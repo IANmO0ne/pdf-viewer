@@ -1,25 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-function clonePdfFile(file: any) {
-  if (!file) return file;
-
-  // Typed arrays
-  if (file instanceof Uint8Array) return file.slice(0);
-
-  // Raw buffers
-  if (file instanceof ArrayBuffer) return file.slice(0);
-
-  // react-pdf / pdfjs file object: { data: Uint8Array | ArrayBuffer | ... }
-  if (typeof file === "object" && (file as any).data) {
-    const d = (file as any).data;
-    if (d instanceof Uint8Array) return { ...(file as any), data: d.slice(0) };
-    if (d instanceof ArrayBuffer) return { ...(file as any), data: d.slice(0) };
-  }
-
-  return file;
-}
-
-
 import { call, definePlugin } from "@decky/api";
 import {
   ButtonItem,
@@ -273,7 +253,8 @@ setSelectedPdf(name);
                 : "Off: uses pdf.js worker (may be faster)"
             }
             checked={disableWorker}
-            onChange={() => { const v = true; setDisableWorker(v);
+            onChange={(v) => {
+              setDisableWorker(v);
               setPdfJsWorkerDisabled(v);
               void persistState({ disable_worker: v });
             }}
@@ -346,7 +327,7 @@ setSelectedPdf(name);
           onChange={(v) => {
             setPagedMode(v);
             void persistState({ paged_mode: v });
-           }}
+          }}
         />
       </PanelSectionRow>
 
@@ -373,7 +354,7 @@ setSelectedPdf(name);
             <div style={{ fontSize: 12, opacity: 0.8 }}>Loading PDF...</div>
           ) : (
             <Document key={pdfReloadKey}
-            file={clonePdfFile(pdfData ? { data: pdfData } : undefined)}
+            file={pdfData ? { data: pdfData } : undefined}
             onLoadSuccess={(info: { numPages: number }) => {
               setPdfError("");
               setNumPages(info.numPages);

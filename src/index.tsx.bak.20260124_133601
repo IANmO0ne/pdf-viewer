@@ -273,7 +273,8 @@ setSelectedPdf(name);
                 : "Off: uses pdf.js worker (may be faster)"
             }
             checked={disableWorker}
-            onChange={() => { const v = true; setDisableWorker(v);
+            onChange={(v) => {
+              setDisableWorker(v);
               setPdfJsWorkerDisabled(v);
               void persistState({ disable_worker: v });
             }}
@@ -346,7 +347,7 @@ setSelectedPdf(name);
           onChange={(v) => {
             setPagedMode(v);
             void persistState({ paged_mode: v });
-           }}
+          }}
         />
       </PanelSectionRow>
 

@@ -1,25 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-function clonePdfFile(file: any) {
-  if (!file) return file;
-
-  // Typed arrays
-  if (file instanceof Uint8Array) return file.slice(0);
-
-  // Raw buffers
-  if (file instanceof ArrayBuffer) return file.slice(0);
-
-  // react-pdf / pdfjs file object: { data: Uint8Array | ArrayBuffer | ... }
-  if (typeof file === "object" && (file as any).data) {
-    const d = (file as any).data;
-    if (d instanceof Uint8Array) return { ...(file as any), data: d.slice(0) };
-    if (d instanceof ArrayBuffer) return { ...(file as any), data: d.slice(0) };
-  }
-
-  return file;
-}
-
-
 import { call, definePlugin } from "@decky/api";
 import {
   ButtonItem,
@@ -31,31 +11,16 @@ import {
 
 import { Document, Page, pdfjs } from "react-pdf";
 
-// --- PDF.js worker bootstrap for Decky overlay (Game Mode safe) ---
-// We cannot rely on steamloopback.host serving /plugins/.../dist assets.
-// Instead, we load the worker file via backend RPC and create a Blob URL once.
-let __pdfWorkerBlobUrl: string | null = null;
-
-async function ensurePdfWorker(backend: <T>(method: string, ...args: any[]) => Promise<T>) {
-  if (__pdfWorkerBlobUrl) return __pdfWorkerBlobUrl;
-
-  const b64 = await backend<string>("get_pdf_worker_b64");
-  const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  const blob = new Blob([bin], { type: "text/javascript" });
-
-  __pdfWorkerBlobUrl = URL.createObjectURL(blob);
-  pdfjs.GlobalWorkerOptions.workerSrc = __pdfWorkerBlobUrl;
-  return __pdfWorkerBlobUrl;
-}
-// ---------------------------------------------------------------
-
-
-
-// Decky overlay: worker must be served from the plugin dist path
-
-// Performance defaults for Decky overlay
-const RENDER_TEXT_LAYER = false;
-const RENDER_ANNOTATIONS = false;
+/**
+ * Worker configuration:
+ * Decky + rollup can be picky about module workers. We configure workerSrc,
+ * and we also offer a "Disable worker" toggle as a fallback that usually fixes
+ * "Failed to load PDF" when worker resolution breaks.
+ */
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url
+).toString();
 
 type PdfEntry = { name: string; size: number; mtime: number };
 
@@ -71,19 +36,15 @@ async function backend<T>(method: string, ...args: any[]): Promise<T> {
   return await call<any[], T>(method as any, ...args);
 }
 
-function setPdfJsWorkerDisabled(disable: boolean) {
-  // In Decky, workerSrc must remain a stable /plugins/<id>/dist/ URL.
-  // Disabling worker uses the fake worker path but STILL reads workerSrc.
-  (pdfjs as any).disableWorker = disable;
-}
-
+// Performance defaults for Decky overlay
+const RENDER_TEXT_LAYER = false;
+const RENDER_ANNOTATIONS = false;
 
 function PdfViewerContent() {
   const [pdfDir, setPdfDir] = useState<string>("");
   const [pdfs, setPdfs] = useState<PdfEntry[]>([]);
 
   const [selectedPdf, setSelectedPdf] = useState<string>("");
-  const [pdfReloadKey, setPdfReloadKey] = useState<number>(0);
   const [pdfB64, setPdfB64] = useState<string>("");
 
   const [numPages, setNumPages] = useState<number>(0);
@@ -91,21 +52,19 @@ function PdfViewerContent() {
   const [pagedMode, setPagedMode] = useState<boolean>(true);
   const [zoom, setZoom] = useState<number>(1.0);
 
-  // Your toggle: "Disable PDF worker"
+  // Key fix: explicit picker mode so we never “snap back” automatically.
+  const [isPicking, setIsPicking] = useState<boolean>(true);
+
+  // Worker fallback toggle
   const [disableWorker, setDisableWorker] = useState<boolean>(true);
-
-  
-  const [pdfError, setPdfError] = useState<string>("");
-// Critical: prevent “auto-resume” from re-firing after user intentionally goes back to select.
-  const didAutoResumeRef = useRef<boolean>(false);
-
-  // Selection vs viewer mode
-  const [view, setView] = useState<"select" | "view">("select");
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   const pdfData = useMemo(() => {
     if (!pdfB64) return null;
+
+    // Base64 -> Uint8Array
+    // Note: for very large PDFs this can be memory heavy. Later we can stream/serve bytes.
     const bin = atob(pdfB64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -129,20 +88,13 @@ function PdfViewerContent() {
     const state = await backend<SavedState>("load_state");
 
     setSelectedPdf(state.last_pdf || "");
-    
-              // Ensure pdf.js worker is ready before attempting to render
-              await ensurePdfWorker(backend);
-              setPdfReloadKey((k) => k + 1);
-setPage(state.last_page || 1);
+    setPage(state.last_page || 1);
     setPagedMode(state.paged_mode ?? true);
     setZoom(state.zoom || 1.0);
+    setDisableWorker(state.disable_worker ?? true);
 
-    const dw = state.disable_worker ?? true;
-    setDisableWorker(dw);
-    setPdfJsWorkerDisabled(dw);
-
-    // Start in selection view; auto-resume will switch to viewer once.
-    setView("select");
+    // On boot: if we have a saved PDF, start in “viewer mode”; otherwise picker.
+    setIsPicking(!state.last_pdf);
   }
 
   async function persistState(next?: Partial<SavedState>) {
@@ -153,37 +105,29 @@ setPage(state.last_page || 1);
       zoom: next?.zoom ?? zoom,
       disable_worker: next?.disable_worker ?? disableWorker,
     };
-
     await backend<void>(
       "save_state",
       state.last_pdf,
       state.last_page,
       state.paged_mode,
-      state.zoom,
-      state.disable_worker
+      state.zoom
     );
+    // backend currently doesn't store disable_worker; we store it locally via another setting below.
+    await backend<void>("save_state_extra", state.disable_worker);
   }
 
   async function openPdf(name: string) {
-    // Clear old PDF immediately so the UI shows the loading indicator predictably.
-    setPdfError("");
     setPdfB64("");
     setNumPages(0);
-setSelectedPdf(name);
-    setView("view");
 
-    await persistState({ last_pdf: name });
+    setSelectedPdf(name);
+    setIsPicking(false);
 
-    try {
-      const b64 = await backend<string>("load_pdf_base64", name);
+    await persistState({ last_pdf: name, last_page: 1 });
+
+    const b64 = await backend<string>("load_pdf_base64", name);
     setPdfB64(b64);
-      } catch (e: any) {
-      const msg = String(e?.message ?? e ?? "Unknown error");
-      setPdfError(msg);
-      setView("select");
-      return;
-    }
-}
+  }
 
   function nextPage() {
     const p = clampPage(page + 1);
@@ -216,43 +160,38 @@ setSelectedPdf(name);
     })();
   }, []);
 
+  // Auto resume only when NOT in picker mode.
   useEffect(() => {
-    // Auto-resume exactly once, only if last_pdf still exists in list.
-    if (didAutoResumeRef.current) return;
+    if (isPicking) return;
     if (!selectedPdf) return;
-    if (pdfs.length === 0) return;
+    if (pdfB64) return;
 
     const exists = pdfs.some((p) => p.name === selectedPdf);
-    if (!exists) return;
+    if (exists) void openPdf(selectedPdf);
+  }, [isPicking, selectedPdf, pdfs, pdfB64]);
 
-    didAutoResumeRef.current = true;
-    void openPdf(selectedPdf);
-  }, [selectedPdf, pdfs]);
-
+  // Scroll resume in scroll mode
   useEffect(() => {
-    // If user is in scroll mode, scroll to current page after render.
-    if (!pdfData) return;
-    if (pagedMode) return;
+    if (!pdfData || pagedMode) return;
     const el = scrollContainerRef.current?.querySelector<HTMLDivElement>(
       `[data-page="${page}"]`
     );
     el?.scrollIntoView({ block: "start" });
   }, [pdfData, pagedMode, page]);
 
-  // --- SELECTION VIEW ---
-  if (view === "select") {
+  // Apply worker toggle
+  useEffect(() => {
+    (pdfjs as any).disableWorker = disableWorker;
+    void persistState({ disable_worker: disableWorker });
+  }, [disableWorker]);
+
+  if (isPicking) {
     return (
       <PanelSection title="PDF Viewer">
         <PanelSectionRow>
           <div style={{ fontSize: 12, opacity: 0.85, lineHeight: "16px" }}>
             Place PDF files here:
-            <div
-              style={{
-                marginTop: 6,
-                fontFamily: "monospace",
-                wordBreak: "break-all",
-              }}
-            >
+            <div style={{ marginTop: 6, fontFamily: "monospace", wordBreak: "break-all" }}>
               {pdfDir || "(loading...)"}
             </div>
           </div>
@@ -266,17 +205,10 @@ setSelectedPdf(name);
 
         <PanelSectionRow>
           <ToggleField
-            label="Disable PDF worker"
-            description={
-              disableWorker
-                ? "On: most compatible in Decky overlay"
-                : "Off: uses pdf.js worker (may be faster)"
-            }
+            label="Disable PDF worker (compatibility mode)"
+            description="If PDFs fail to load, keep this enabled."
             checked={disableWorker}
-            onChange={() => { const v = true; setDisableWorker(v);
-              setPdfJsWorkerDisabled(v);
-              void persistState({ disable_worker: v });
-            }}
+            onChange={(v) => setDisableWorker(v)}
           />
         </PanelSectionRow>
 
@@ -284,7 +216,7 @@ setSelectedPdf(name);
           <DropdownItem
             label="Select PDF"
             rgOptions={pdfs.map((p) => ({ label: p.name, data: p.name }))}
-            selectedOption={undefined}
+            selectedOption={selectedPdf || undefined}
             onChange={(opt) => {
               const name = String(opt.data);
               void openPdf(name);
@@ -304,31 +236,23 @@ setSelectedPdf(name);
     );
   }
 
-  // --- VIEWER MODE ---
   return (
-    <PanelSection title={`PDF Viewer: ${selectedPdf || "(none)"}`}>
+    <PanelSection title={`PDF Viewer: ${selectedPdf}`}>
       <PanelSectionRow>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <ButtonItem layout="inline" onClick={zoomIn}>
-            Zoom +
-          </ButtonItem>
-          <ButtonItem layout="inline" onClick={zoomOut}>
-            Zoom -
-          </ButtonItem>
-          <ButtonItem layout="inline" onClick={prevPage}>
-            Previous PG
-          </ButtonItem>
-          <ButtonItem layout="inline" onClick={nextPage}>
-            Next PG
-          </ButtonItem>
+          <ButtonItem layout="inline" onClick={zoomIn}>Zoom +</ButtonItem>
+          <ButtonItem layout="inline" onClick={zoomOut}>Zoom -</ButtonItem>
+          <ButtonItem layout="inline" onClick={prevPage}>Previous PG</ButtonItem>
+          <ButtonItem layout="inline" onClick={nextPage}>Next PG</ButtonItem>
           <ButtonItem
             layout="inline"
             onClick={() => {
-              // IMPORTANT: stay in selection view, do not allow auto-resume to re-trigger.
-              didAutoResumeRef.current = true;
+              // Go to picker and DO NOT auto-reopen.
+              setIsPicking(true);
               setPdfB64("");
               setNumPages(0);
-              setView("select");
+              setSelectedPdf("");
+              void persistState({ last_pdf: "", last_page: 1 });
             }}
           >
             Select PDF
@@ -339,51 +263,33 @@ setSelectedPdf(name);
       <PanelSectionRow>
         <ToggleField
           label="Scroll / PG by PG"
-          description={
-            pagedMode ? "Checked: one page at a time" : "Unchecked: continuous scroll"
-          }
+          description={pagedMode ? "Checked: one page at a time" : "Unchecked: continuous scroll"}
           checked={pagedMode}
           onChange={(v) => {
             setPagedMode(v);
             void persistState({ paged_mode: v });
-           }}
-        />
-      </PanelSectionRow>
-
-      <PanelSectionRow>
-        <ToggleField
-          label="Disable PDF worker"
-          description={
-            disableWorker
-              ? "On: most compatible in Decky overlay"
-              : "Off: uses pdf.js worker (may be faster)"
-          }
-          checked={disableWorker}
-          onChange={(v) => {
-            setDisableWorker(v);
-            setPdfJsWorkerDisabled(v);
-            void persistState({ disable_worker: v });
           }}
         />
       </PanelSectionRow>
 
       <PanelSectionRow>
+        <ToggleField
+          label="Disable PDF worker (compatibility mode)"
+          description="Enable if you see “Failed to load PDF”."
+          checked={disableWorker}
+          onChange={(v) => setDisableWorker(v)}
+        />
+      </PanelSectionRow>
+
+      <PanelSectionRow>
         <div style={{ width: "100%" }}>
-          {!pdfData ? (
-            <div style={{ fontSize: 12, opacity: 0.8 }}>Loading PDF...</div>
-          ) : (
-            <Document key={pdfReloadKey}
-            file={clonePdfFile(pdfData ? { data: pdfData } : undefined)}
+          <Document
+            file={pdfData ? { data: pdfData } : undefined}
             onLoadSuccess={(info: { numPages: number }) => {
-              setPdfError("");
               setNumPages(info.numPages);
               const p = clampPage(page);
               setPage(p);
               void persistState({ last_page: p });
-            }}
-            onLoadError={(err: any) => {
-              const msg = String(err?.message ?? err ?? "Unknown PDF load error");
-              setPdfError(msg);
             }}
             loading={<div style={{ fontSize: 12, opacity: 0.8 }}>Loading PDF...</div>}
             error={<div style={{ fontSize: 12, opacity: 0.8 }}>Failed to load PDF.</div>}
@@ -405,11 +311,7 @@ setSelectedPdf(name);
                 {Array.from({ length: numPages }, (_, i) => {
                   const pageNumber = i + 1;
                   return (
-                    <div
-                      key={pageNumber}
-                      data-page={pageNumber}
-                      style={{ marginBottom: 12 }}
-                    >
+                    <div key={pageNumber} data-page={pageNumber} style={{ marginBottom: 12 }}>
                       <Page
                         pageNumber={pageNumber}
                         scale={zoom}
@@ -422,13 +324,6 @@ setSelectedPdf(name);
               </div>
             )}
           </Document>
-          )}
-
-          {pdfError ? (
-            <div style={{ fontSize: 12, opacity: 0.85, marginTop: 8 }}>
-              PDF error: {pdfError}
-            </div>
-          ) : null}
 
           <div style={{ fontSize: 12, opacity: 0.8, marginTop: 8 }}>
             Page {page} / {numPages} | Zoom {zoom.toFixed(2)}x
@@ -441,7 +336,7 @@ setSelectedPdf(name);
 
 export default definePlugin(() => {
   return {
-    name: "pdf-viewer",
+    name: "PDF Viewer",
     title: <div className="Title">PDF Viewer</div>,
     content: <PdfViewerContent />,
     icon: <div style={{ fontSize: 16 }}>📄</div>,

@@ -1,4 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { call, definePlugin } from "@decky/api";
+import {
+  ButtonItem,
+  DropdownItem,
+  PanelSection,
+  PanelSectionRow,
+  ToggleField,
+} from "@decky/ui";
+import { Document, Page, pdfjs } from "react-pdf";
 
 function clonePdfFile(file: any) {
   if (!file) return file;
@@ -19,17 +28,6 @@ function clonePdfFile(file: any) {
   return file;
 }
 
-
-import { call, definePlugin } from "@decky/api";
-import {
-  ButtonItem,
-  DropdownItem,
-  PanelSection,
-  PanelSectionRow,
-  ToggleField,
-} from "@decky/ui";
-
-import { Document, Page, pdfjs } from "react-pdf";
 
 // --- PDF.js worker bootstrap for Decky overlay (Game Mode safe) ---
 // We cannot rely on steamloopback.host serving /plugins/.../dist assets.
@@ -389,15 +387,33 @@ setSelectedPdf(name);
             error={<div style={{ fontSize: 12, opacity: 0.8 }}>Failed to load PDF.</div>}
           >
             {pagedMode ? (
+
+  <div style={ width: "100%", minWidth: 0 }>
+    <div
+      style={
+        width: "100%",
+        minWidth: 0,
+        maxHeight: 520,
+        overflowX: "auto",
+        overflowY: "auto",
+        borderRadius: 6,
+        padding: 4,
+      }
+    >
+
               <div style={{ overflow: "hidden" }}>
-                <Page
+                <div style={{ display: "inline-block" }}><Page
                   pageNumber={page}
                   scale={zoom}
                   renderTextLayer={RENDER_TEXT_LAYER}
                   renderAnnotationLayer={RENDER_ANNOTATIONS}
                 />
-              </div>
-            ) : (
+              </div></div>
+            
+    </div>
+  </div>
+) : (
+
               <div
                 ref={scrollContainerRef}
                 style={{ maxHeight: 420, overflowY: "auto", paddingRight: 6 }}
@@ -418,7 +434,8 @@ setSelectedPdf(name);
                       />
                     </div>
                   );
-                })}
+                }
+)}
               </div>
             )}
           </Document>

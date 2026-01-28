@@ -69,16 +69,5 @@ class Plugin:
     async def _main(self):
         pass
 
-    async def get_pdf_worker_b64(self) -> str:
-        """
-        Return pdf.js worker file as base64 so the frontend can create a Blob URL.
-        This avoids relying on steamloopback.host serving /plugins/... files.
-        """
-        # dist/pdf.worker.min.js is produced by postbuild
-        worker_path = Path(__file__).resolve().parent / "dist" / "pdf.worker.min.js"
-        data = worker_path.read_bytes()
-        return base64.b64encode(data).decode("ascii")
-
-
     async def _unload(self):
         pass

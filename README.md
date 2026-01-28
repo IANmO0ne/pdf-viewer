@@ -99,3 +99,5 @@ Note regarding licenses: Including a license is required for the plugin store if
 Standard procedure for licenses is to have your chosen license at the top of the file, and to leave the original license for the plugin-template at the bottom. If this is not the case on submission to the plugin database, you will be asked to fix this discrepancy.
 
 We cannot and will not distribute your plugin on the Plugin Store if it's license requires it's inclusion but you have not included a license to be re-distributed with your plugin in the root of your git repository.
+# pdf-viewer
+# pdf-viewer
