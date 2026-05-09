@@ -89,6 +89,33 @@ def test_default_folder_is_created_and_supported_listing_is_recursive(plugin_mod
     assert entries[0]["sizeBytes"] > 0
 
 
+def test_common_folder_with_files_is_auto_selected(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+
+    async def exercise():
+        default_folder = Path(module.DEFAULT_PDF_FOLDER)
+        alternate_folder = default_folder.parent / "PDF Steamdeck"
+        alternate_folder.mkdir(parents=True)
+        (alternate_folder / "guide.pdf").write_bytes(b"%PDF-1.7\n")
+
+        await plugin._main()
+        settings = await plugin.get_settings()
+        entries = await plugin.list_pdfs()
+        diagnostics = await plugin.get_library_diagnostics()
+        await plugin._unload()
+        return settings, entries, diagnostics
+
+    settings, entries, diagnostics = run(exercise())
+    assert Path(settings["pdfFolder"]).name == "PDF Steamdeck"
+    assert [entry["relativePath"] for entry in entries] == ["guide.pdf"]
+    assert diagnostics["activeFolder"] == settings["pdfFolder"]
+    assert any(
+        candidate["folder"] == settings["pdfFolder"] and candidate["supportedCount"] == 1
+        for candidate in diagnostics["candidates"]
+    )
+
+
 def test_text_content_loads_for_text_files(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()

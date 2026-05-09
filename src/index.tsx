@@ -78,6 +78,19 @@ interface TextContent {
   text: string;
 }
 
+interface LibraryCandidate {
+  folder: string;
+  exists: boolean;
+  supportedCount: number;
+}
+
+interface LibraryDiagnostics {
+  activeFolder: string;
+  activeExists: boolean;
+  supportedExtensions: string[];
+  candidates: LibraryCandidate[];
+}
+
 interface PdfViewport {
   width: number;
   height: number;
@@ -124,6 +137,9 @@ const getLogInfo = callable<
   [],
   { logFile: string; logDir: string; settingsFile: string; stateFile: string }
 >("get_log_info");
+const getLibraryDiagnostics = callable<[], LibraryDiagnostics>(
+  "get_library_diagnostics"
+);
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
@@ -327,6 +343,7 @@ function Content() {
   const [errorMessage, setErrorMessage] = useState("");
   const [renderMessage, setRenderMessage] = useState("");
   const [logPath, setLogPath] = useState("");
+  const [diagnostics, setDiagnostics] = useState<LibraryDiagnostics | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -355,14 +372,16 @@ function Content() {
     setErrorMessage("");
 
     try {
-      const [loadedSettings, loadedPdfs, loadedLogInfo] = await Promise.all([
+      const loadedPdfs = await listPdfs();
+      const [loadedSettings, loadedLogInfo, loadedDiagnostics] = await Promise.all([
         getSettings(),
-        listPdfs(),
-        getLogInfo()
+        getLogInfo(),
+        getLibraryDiagnostics().catch(() => null)
       ]);
       setSettings(loadedSettings);
       setPdfs(loadedPdfs);
       setLogPath(loadedLogInfo.logFile || loadedLogInfo.logDir);
+      setDiagnostics(loadedDiagnostics);
       setBusyMessage("");
 
       if (selectedPdf && !loadedPdfs.some((pdf) => pdf.id === selectedPdf.id)) {
@@ -564,6 +583,10 @@ function Content() {
     : settings.pdfFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
   const visibleFiles = pdfs.slice(0, 150);
+  const candidateSummary = diagnostics?.candidates
+    .filter((candidate) => candidate.exists)
+    .slice(0, 4)
+    .map((candidate) => `${candidate.folder} (${candidate.supportedCount})`);
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -643,6 +666,21 @@ function Content() {
         <PanelSectionRow>
           <div style={styles.smallText}>{settings.pdfFolder}</div>
         </PanelSectionRow>
+        {pdfs.length === 0 && diagnostics ? (
+          <PanelSectionRow>
+            <div style={styles.smallText}>
+              <div>Supported: {diagnostics.supportedExtensions.join(", ")}</div>
+              {candidateSummary && candidateSummary.length > 0 ? (
+                <>
+                  <div>Checked folders:</div>
+                  {candidateSummary.map((candidate) => (
+                    <div key={candidate}>{candidate}</div>
+                  ))}
+                </>
+              ) : null}
+            </div>
+          </PanelSectionRow>
+        ) : null}
         <PanelSectionRow>
           <ButtonItem layout="inline" onClick={() => void refreshLibrary()}>
             <FaSyncAlt /> Refresh library

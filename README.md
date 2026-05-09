@@ -7,6 +7,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 ## V1 Features
 
 - Recursively lists `.pdf`, `.epub`, `.txt`, and `.md` files from `/home/deck/Documents/PDF Seamdeck`
+- Auto-detects common alternate folder names such as `/home/deck/Documents/PDF Steamdeck` when the configured folder is empty
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out, panning, bookmarks, and bookmark navigation
@@ -18,6 +19,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 ## Steam Deck Install For Testing
 
 1. Put your guides in `/home/deck/Documents/PDF Seamdeck`.
+   If you already made a similar folder such as `/home/deck/Documents/PDF Steamdeck`, the plugin will auto-select it when it finds supported files there.
 2. Build the plugin from this repository:
 
    ```sh
@@ -29,6 +31,8 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 3. Copy `out/decky-pdf-viewer.zip` to your Steam Deck.
 4. Enable Decky Loader developer mode and install the zip as a local plugin.
 5. Open the Quick Access Menu, choose `PDF Viewer`, refresh the PDF list, and select a guide.
+
+If Decky still shows a `Failed to fetch dynamically imported module` error after installing a new zip, uninstall the old local plugin first or remove stale plugin folders from `/home/deck/homebrew/plugins/`, then reinstall the current zip and reboot Gaming Mode.
 
 The GitHub release flow is the intended publish path once Steam Deck testing confirms the plugin behaves well in Gaming Mode. Upload `out/decky-pdf-viewer.zip` to a release, then download and install that zip on the Deck.
 

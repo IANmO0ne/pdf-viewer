@@ -21,6 +21,15 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
+COMMON_LIBRARY_FOLDER_NAMES = (
+    "PDF Seamdeck",
+    "PDF Steamdeck",
+    "PDF Steam Deck",
+    "PDF Steam deck",
+    "PDF Viewer",
+    "PDF Guides",
+    "Strategy Guides",
+)
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
 MIN_ZOOM = 0.5
@@ -78,9 +87,14 @@ class Plugin:
         self._settings = self._read_json(self.settings_path, default_settings())
         self._settings = self._sanitize_settings(self._settings)
         self._state = self._read_json(self.state_path, {})
+        self._auto_select_library_folder()
         self._ensure_pdf_folder()
         await self._start_http_server()
-        self._log("info", "PDF Viewer started", {"port": self._server_port})
+        self._log(
+            "info",
+            "PDF Viewer started",
+            {"port": self._server_port, "pdfFolder": self._settings["pdfFolder"]},
+        )
 
     async def _unload(self) -> None:
         await self._stop_http_server()
@@ -111,7 +125,11 @@ class Plugin:
     async def list_pdfs(self) -> list[dict[str, Any]]:
         async with self._get_lock():
             entries = self._scan_supported_files()
-            self._log("debug", "Library folder scanned", {"count": len(entries)})
+            self._log(
+                "debug",
+                "Library folder scanned",
+                {"folder": self._settings["pdfFolder"], "count": len(entries)},
+            )
             return entries
 
     async def get_pdf_access(self, pdf_id: str) -> dict[str, Any]:
@@ -213,6 +231,26 @@ class Plugin:
             "settingsFile": str(self.settings_path),
             "stateFile": str(self.state_path),
         }
+
+    async def get_library_diagnostics(self) -> dict[str, Any]:
+        async with self._get_lock():
+            active_folder = Path(self._settings["pdfFolder"]).expanduser()
+            candidates = []
+            for folder in self._candidate_library_folders():
+                candidates.append(
+                    {
+                        "folder": str(folder),
+                        "exists": folder.exists(),
+                        "supportedCount": self._count_supported_files(folder),
+                    }
+                )
+
+            return {
+                "activeFolder": str(active_folder),
+                "activeExists": active_folder.exists(),
+                "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
+                "candidates": candidates,
+            }
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -319,6 +357,87 @@ class Plugin:
             value = 1.0
         return round(min(MAX_ZOOM, max(MIN_ZOOM, value)), 2)
 
+    def _candidate_library_folders(self) -> list[Path]:
+        configured = Path(self._settings.get("pdfFolder") or DEFAULT_PDF_FOLDER).expanduser()
+        default = Path(DEFAULT_PDF_FOLDER).expanduser()
+        candidates = [configured, default]
+        documents_folder = default.parent
+
+        for name in COMMON_LIBRARY_FOLDER_NAMES:
+            candidates.append(documents_folder / name)
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
+
+    def _count_supported_files(self, folder: Path, limit: int = 10_000) -> int:
+        try:
+            if not folder.exists() or not folder.is_dir():
+                return 0
+        except OSError:
+            return 0
+
+        count = 0
+        try:
+            for child in folder.rglob("*"):
+                try:
+                    if child.is_file() and self._kind_for_path(child) is not None:
+                        count += 1
+                        if count >= limit:
+                            break
+                except OSError:
+                    continue
+        except OSError as error:
+            self._log(
+                "warning",
+                "Unable to count supported files in candidate folder",
+                {"folder": str(folder), "error": str(error)},
+            )
+        return count
+
+    def _auto_select_library_folder(self) -> bool:
+        current_folder = Path(self._settings["pdfFolder"]).expanduser()
+        current_count = self._count_supported_files(current_folder)
+        if current_count > 0:
+            return False
+
+        best_folder: Path | None = None
+        best_count = 0
+        for candidate in self._candidate_library_folders():
+            count = self._count_supported_files(candidate)
+            if count > best_count:
+                best_folder = candidate
+                best_count = count
+
+        if best_folder is None or best_count <= 0:
+            return False
+
+        try:
+            if current_folder.resolve(strict=False) == best_folder.resolve(strict=False):
+                return False
+        except OSError:
+            pass
+
+        previous_folder = self._settings["pdfFolder"]
+        self._settings["pdfFolder"] = str(best_folder)
+        self._write_json(self.settings_path, self._settings)
+        self._log(
+            "info",
+            "Auto-selected library folder with supported files",
+            {
+                "previousFolder": previous_folder,
+                "selectedFolder": self._settings["pdfFolder"],
+                "supportedCount": best_count,
+            },
+        )
+        return True
+
     def _scan_supported_files(self) -> list[dict[str, Any]]:
         folder = Path(self._settings["pdfFolder"]).expanduser().resolve()
         folder.mkdir(parents=True, exist_ok=True)
@@ -368,6 +487,9 @@ class Plugin:
                 )
 
         entries.sort(key=lambda entry: entry["relativePath"].casefold())
+        if not entries and self._auto_select_library_folder():
+            return self._scan_supported_files()
+
         self._file_index = index
         return entries
 
