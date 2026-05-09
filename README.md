@@ -1,13 +1,14 @@
 # PDF Viewer for Decky Loader
 
-PDF Viewer is a Decky Loader plugin for reading PDF strategy guides from the Steam Deck Quick Access Menu while a game is running.
+PDF Viewer is a Decky Loader plugin for reading strategy guides from the Steam Deck Quick Access Menu while a game is running.
 
 Repository: https://github.com/IANmO0ne/pdf-viewer
 
 ## V1 Features
 
-- Lists non-recursive `.pdf` files from `/home/deck/Documents/PDF Seamdeck`
+- Recursively lists `.pdf`, `.epub`, `.txt`, and `.md` files from `/home/deck/Documents/PDF Seamdeck`
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
+- Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out, panning, bookmarks, and bookmark navigation
 - Remembers the last page and zoom per PDF
 - Stores settings and state in Decky's plugin settings directory
@@ -16,7 +17,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 
 ## Steam Deck Install For Testing
 
-1. Put your PDF guides in `/home/deck/Documents/PDF Seamdeck`.
+1. Put your guides in `/home/deck/Documents/PDF Seamdeck`.
 2. Build the plugin from this repository:
 
    ```sh
@@ -51,7 +52,7 @@ If `pytest` is not installed on the development machine, run:
 python -m pip install -r requirements-dev.txt
 ```
 
-The plugin intentionally ships as a single-page reader in v1. Continuous scroll and search are future features because large strategy guides can be expensive to render inside the Decky side panel.
+The plugin intentionally ships with single-page PDF rendering. Continuous scroll and search are future features because large strategy guides can be expensive to render inside the Decky side panel.
 
 If Decky cannot load `dist/pdf.worker.min.mjs` on the Steam Deck, the previous project's blob-worker approach can be added as a fallback. That is intentionally deferred until real Deck testing shows it is needed.
 

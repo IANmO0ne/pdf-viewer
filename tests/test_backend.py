@@ -54,7 +54,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_default_folder_is_created_and_pdf_listing_is_filtered(plugin_module):
+def test_default_folder_is_created_and_supported_listing_is_recursive(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
@@ -68,15 +68,66 @@ def test_default_folder_is_created_and_pdf_listing_is_filtered(plugin_module):
         (pdf_folder / "notes.txt").write_text("ignore me", encoding="utf-8")
         (pdf_folder / "nested").mkdir()
         (pdf_folder / "nested" / "nested.pdf").write_bytes(b"%PDF-1.7\n")
+        (pdf_folder / "nested" / "book.epub").write_bytes(
+            b"PK\x05\x06" + (b"\x00" * 18)
+        )
+        (pdf_folder / "image.png").write_bytes(b"not supported")
 
         entries = await plugin.list_pdfs()
         await plugin._unload()
         return entries
 
     entries = run(exercise())
-    assert [entry["name"] for entry in entries] == ["guide.PDF"]
+    assert [entry["relativePath"] for entry in entries] == [
+        "guide.PDF",
+        "nested/book.epub",
+        "nested/nested.pdf",
+        "notes.txt",
+    ]
+    assert [entry["kind"] for entry in entries] == ["pdf", "epub", "pdf", "text"]
     assert entries[0]["id"]
     assert entries[0]["sizeBytes"] > 0
+
+
+def test_text_content_loads_for_text_files(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+
+    async def exercise():
+        await plugin._main()
+        pdf_folder = Path((await plugin.get_settings())["pdfFolder"])
+        (pdf_folder / "walkthrough.txt").write_text("Chapter 1\nGo north.", encoding="utf-8")
+        entry = (await plugin.list_pdfs())[0]
+        content = await plugin.get_text_content(entry["id"])
+        await plugin._unload()
+        return content
+
+    content = run(exercise())
+    assert content["kind"] == "text"
+    assert "Go north" in content["text"]
+
+
+def test_epub_content_extracts_readable_text(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+
+    async def exercise():
+        await plugin._main()
+        pdf_folder = Path((await plugin.get_settings())["pdfFolder"])
+        epub_path = pdf_folder / "guide.epub"
+        with __import__("zipfile").ZipFile(epub_path, "w") as archive:
+            archive.writestr(
+                "OPS/chapter1.xhtml",
+                "<html><body><h1>Start</h1><p>Open the chest.</p></body></html>",
+            )
+        entry = (await plugin.list_pdfs())[0]
+        content = await plugin.get_text_content(entry["id"])
+        await plugin._unload()
+        return content
+
+    content = run(exercise())
+    assert content["kind"] == "epub"
+    assert "Open the chest" in content["text"]
 
 
 def test_bookmarks_and_positions_are_isolated_by_pdf(plugin_module):

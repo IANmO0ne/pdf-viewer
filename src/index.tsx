@@ -16,6 +16,8 @@ import {
   FaArrowRight,
   FaBookmark,
   FaCog,
+  FaFileAlt,
+  FaBookOpen,
   FaFilePdf,
   FaHome,
   FaListUl,
@@ -36,9 +38,13 @@ interface Settings {
   zoomStep: number;
 }
 
+type LibraryKind = "pdf" | "epub" | "text";
+
 interface PdfEntry {
   id: string;
+  kind: LibraryKind;
   name: string;
+  relativePath: string;
   sizeBytes: number;
   modifiedTime: string;
 }
@@ -63,6 +69,13 @@ interface PdfState {
 interface BookmarkToggleResult {
   bookmarked: boolean;
   bookmarks: Bookmark[];
+}
+
+interface TextContent {
+  id: string;
+  kind: LibraryKind;
+  name: string;
+  text: string;
 }
 
 interface PdfViewport {
@@ -93,6 +106,7 @@ const getSettings = callable<[], Settings>("get_settings");
 const saveSettings = callable<[settings: Partial<Settings>], Settings>("save_settings");
 const listPdfs = callable<[], PdfEntry[]>("list_pdfs");
 const getPdfAccess = callable<[pdfId: string], PdfAccess>("get_pdf_access");
+const getTextContent = callable<[fileId: string], TextContent>("get_text_content");
 const getPdfState = callable<[pdfId: string], PdfState>("get_pdf_state");
 const savePdfPosition = callable<
   [pdfId: string, page: number, zoom: number],
@@ -195,6 +209,27 @@ const styles = {
     flexDirection: "column",
     gap: "6px"
   },
+  fileList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+    maxHeight: "420px",
+    overflowY: "auto",
+    paddingRight: "4px"
+  },
+  textViewer: {
+    border: "1px solid rgba(255, 255, 255, 0.12)",
+    borderRadius: "6px",
+    background: "#f2efe7",
+    color: "#17191d",
+    minHeight: "420px",
+    maxHeight: "620px",
+    overflow: "auto",
+    padding: "12px",
+    whiteSpace: "pre-wrap",
+    fontSize: "14px",
+    lineHeight: "20px"
+  },
   smallText: {
     color: "rgba(255, 255, 255, 0.68)",
     fontSize: "12px",
@@ -238,6 +273,26 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+function fileIcon(kind: LibraryKind) {
+  if (kind === "pdf") {
+    return <FaFilePdf />;
+  }
+  if (kind === "epub") {
+    return <FaBookOpen />;
+  }
+  return <FaFileAlt />;
+}
+
+function fileKindLabel(kind: LibraryKind): string {
+  if (kind === "pdf") {
+    return "PDF";
+  }
+  if (kind === "epub") {
+    return "EPUB";
+  }
+  return "Text";
+}
+
 function IconButton(props: {
   icon: ReactNode;
   label: string;
@@ -261,6 +316,7 @@ function Content() {
   const [pdfs, setPdfs] = useState<PdfEntry[]>([]);
   const [selectedPdf, setSelectedPdf] = useState<PdfEntry | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
+  const [textContent, setTextContent] = useState("");
   const [pageNumber, setPageNumber] = useState(1);
   const [pageCount, setPageCount] = useState(0);
   const [zoom, setZoom] = useState(1);
@@ -325,6 +381,7 @@ function Content() {
   useEffect(() => {
     if (!selectedPdf) {
       setPdfDoc(null);
+      setTextContent("");
       setPageCount(0);
       setPageNumber(1);
       setBookmarks([]);
@@ -335,14 +392,29 @@ function Content() {
     let cancelled = false;
     let openedDoc: PdfDocumentProxy | null = null;
 
-    const openPdf = async () => {
+    const openSelectedFile = async () => {
       setBusyMessage(`Opening ${selectedPdf.name}...`);
       setErrorMessage("");
       setRenderMessage("");
       setPdfDoc(null);
+      setTextContent("");
       setBookmarks([]);
 
       try {
+        if (selectedPdf.kind !== "pdf") {
+          const content = await getTextContent(selectedPdf.id);
+          if (cancelled) {
+            return;
+          }
+          setTextContent(content.text);
+          setPageCount(0);
+          setPageNumber(1);
+          setZoom(1);
+          setBookmarks([]);
+          setBusyMessage("");
+          return;
+        }
+
         const [access, state] = await Promise.all([
           getPdfAccess(selectedPdf.id),
           getPdfState(selectedPdf.id)
@@ -378,7 +450,7 @@ function Content() {
       }
     };
 
-    void openPdf();
+    void openSelectedFile();
 
     return () => {
       cancelled = true;
@@ -388,7 +460,7 @@ function Content() {
   }, [reportError, selectedPdf]);
 
   useEffect(() => {
-    if (!selectedPdf || !pdfDoc) {
+    if (!selectedPdf || !pdfDoc || selectedPdf.kind !== "pdf") {
       return () => undefined;
     }
 
@@ -479,9 +551,9 @@ function Content() {
 
   const pdfOptions = useMemo(
     () =>
-      pdfs.map((pdf) => ({
+      pdfs.slice(0, 50).map((pdf) => ({
         data: pdf.id,
-        label: `${pdf.name} (${formatBytes(pdf.sizeBytes)})`
+        label: `${fileKindLabel(pdf.kind)} · ${pdf.relativePath || pdf.name} (${formatBytes(pdf.sizeBytes)})`
       })),
     [pdfs]
   );
@@ -491,6 +563,7 @@ function Content() {
     ? `${formatBytes(selectedPdf.sizeBytes)} • modified ${formatDate(selectedPdf.modifiedTime)}`
     : settings.pdfFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
+  const visibleFiles = pdfs.slice(0, 150);
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -545,13 +618,13 @@ function Content() {
       <PanelSection title="PDF Folder">
         <PanelSectionRow>
           <DropdownItem
-            label="PDF folder"
+            label="Quick picker"
             description={currentPdfDescription}
             rgOptions={pdfOptions}
             selectedOption={selectedPdfId}
             disabled={pdfOptions.length === 0}
-            strDefaultLabel={pdfOptions.length === 0 ? "No PDFs found" : "Choose a PDF"}
-            menuLabel="PDFs"
+            strDefaultLabel={pdfOptions.length === 0 ? "No supported files found" : "Choose a file"}
+            menuLabel="Library"
             onMenuWillOpen={(showMenu) => {
               void refreshLibrary().finally(showMenu);
             }}
@@ -560,12 +633,19 @@ function Content() {
             }}
           />
         </PanelSectionRow>
+        {pdfs.length > 50 ? (
+          <PanelSectionRow>
+            <div style={styles.smallText}>
+              The dropdown shows the first 50 files. Use the file list below for the full library.
+            </div>
+          </PanelSectionRow>
+        ) : null}
         <PanelSectionRow>
           <div style={styles.smallText}>{settings.pdfFolder}</div>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="inline" onClick={() => void refreshLibrary()}>
-            <FaSyncAlt /> Refresh PDF list
+            <FaSyncAlt /> Refresh library
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
@@ -578,10 +658,30 @@ function Content() {
             <div style={styles.empty}>
               {busyMessage ||
                 (pdfs.length === 0
-                  ? "Add PDF guides to the folder above, then refresh."
-                  : "Choose a PDF from the folder dropdown.")}
+                  ? "Add PDF, EPUB, TXT, or MD files to the folder above, then refresh."
+                  : "Choose a file below or from the folder dropdown.")}
             </div>
           </PanelSectionRow>
+          {pdfs.length > 0 ? (
+            <PanelSectionRow>
+              <div style={styles.fileList}>
+                <div style={styles.smallText}>
+                  Showing {visibleFiles.length} of {pdfs.length} supported files.
+                </div>
+                {visibleFiles.map((file) => (
+                  <ButtonItem
+                    key={file.id}
+                    layout="below"
+                    icon={fileIcon(file.kind)}
+                    description={`${fileKindLabel(file.kind)} · ${formatBytes(file.sizeBytes)} · ${file.relativePath}`}
+                    onClick={() => selectPdf(file.id)}
+                  >
+                    {file.name}
+                  </ButtonItem>
+                ))}
+              </div>
+            </PanelSectionRow>
+          ) : null}
         </PanelSection>
       ) : (
         <>
@@ -596,31 +696,31 @@ function Content() {
                 <IconButton
                   label="Previous page"
                   icon={<FaArrowLeft />}
-                  disabled={!pdfDoc || pageNumber <= 1}
+                  disabled={!pdfDoc || selectedPdf.kind !== "pdf" || pageNumber <= 1}
                   onClick={() => changePage(pageNumber - 1)}
                 />
                 <IconButton
                   label="Next page"
                   icon={<FaArrowRight />}
-                  disabled={!pdfDoc || pageNumber >= pageCount}
+                  disabled={!pdfDoc || selectedPdf.kind !== "pdf" || pageNumber >= pageCount}
                   onClick={() => changePage(pageNumber + 1)}
                 />
                 <IconButton
                   label="Zoom out"
                   icon={<FaSearchMinus />}
-                  disabled={!pdfDoc || zoom <= MIN_ZOOM}
+                  disabled={selectedPdf.kind !== "pdf" || !pdfDoc || zoom <= MIN_ZOOM}
                   onClick={() => changeZoom(zoom - settings.zoomStep)}
                 />
                 <IconButton
                   label="Zoom in"
                   icon={<FaSearchPlus />}
-                  disabled={!pdfDoc || zoom >= MAX_ZOOM}
+                  disabled={selectedPdf.kind !== "pdf" || !pdfDoc || zoom >= MAX_ZOOM}
                   onClick={() => changeZoom(zoom + settings.zoomStep)}
                 />
                 <IconButton
                   label="Bookmark page"
                   icon={isCurrentPageBookmarked ? <FaBookmark /> : <FaRegBookmark />}
-                  disabled={!pdfDoc}
+                  disabled={selectedPdf.kind !== "pdf" || !pdfDoc}
                   onClick={() => void onToggleBookmark()}
                 />
                 <IconButton
@@ -633,15 +733,18 @@ function Content() {
             <PanelSectionRow>
               <div style={styles.pageMeta}>
                 <span>
-                  Page {pageCount ? pageNumber : "-"} of {pageCount || "-"}
+                  {selectedPdf.kind === "pdf"
+                    ? `Page ${pageCount ? pageNumber : "-"} of ${pageCount || "-"}`
+                    : fileKindLabel(selectedPdf.kind)}
                 </span>
-                <span>{Math.round(zoom * 100)}%</span>
+                <span>{selectedPdf.kind === "pdf" ? `${Math.round(zoom * 100)}%` : ""}</span>
               </div>
             </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem
                 layout="inline"
                 icon={<FaListUl />}
+                disabled={selectedPdf.kind !== "pdf"}
                 onClick={() => setShowBookmarks((visible) => !visible)}
               >
                 {bookmarks.length === 0
@@ -704,19 +807,25 @@ function Content() {
 
           <PanelSection>
             <PanelSectionRow>
-              <Focusable style={styles.viewerFrame} ref={viewerRef}>
-                {busyMessage ? <div style={styles.empty}>{busyMessage}</div> : null}
-                {renderMessage && !busyMessage ? (
-                  <div style={styles.smallText}>{renderMessage}</div>
-                ) : null}
-                <canvas
-                  ref={canvasRef}
-                  style={{
-                    ...styles.canvas,
-                    visibility: pdfDoc ? "visible" : "hidden"
-                  }}
-                />
-              </Focusable>
+              {selectedPdf.kind === "pdf" ? (
+                <Focusable style={styles.viewerFrame} ref={viewerRef}>
+                  {busyMessage ? <div style={styles.empty}>{busyMessage}</div> : null}
+                  {renderMessage && !busyMessage ? (
+                    <div style={styles.smallText}>{renderMessage}</div>
+                  ) : null}
+                  <canvas
+                    ref={canvasRef}
+                    style={{
+                      ...styles.canvas,
+                      visibility: pdfDoc ? "visible" : "hidden"
+                    }}
+                  />
+                </Focusable>
+              ) : (
+                <Focusable style={styles.textViewer}>
+                  {busyMessage ? <div>{busyMessage}</div> : textContent}
+                </Focusable>
+              )}
             </PanelSectionRow>
           </PanelSection>
         </>

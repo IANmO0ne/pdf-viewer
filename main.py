@@ -8,10 +8,12 @@ import os
 import re
 import secrets
 import traceback
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+from xml.etree import ElementTree
 
 import decky
 
@@ -24,6 +26,13 @@ STATE_FILE = "state.json"
 MIN_ZOOM = 0.5
 MAX_ZOOM = 4.0
 PDF_ID_RE = re.compile(r"^[a-f0-9]{64}$")
+SUPPORTED_EXTENSIONS = {
+    ".pdf": "pdf",
+    ".epub": "epub",
+    ".txt": "text",
+    ".md": "text",
+}
+TEXT_SIZE_LIMIT_BYTES = 2 * 1024 * 1024
 
 
 def utc_now() -> str:
@@ -57,7 +66,7 @@ class Plugin:
 
         self._settings: dict[str, Any] = default_settings()
         self._state: dict[str, Any] = {}
-        self._pdf_index: dict[str, Path] = {}
+        self._file_index: dict[str, Path] = {}
         self._server: asyncio.AbstractServer | None = None
         self._server_port = 0
         self._token = secrets.token_urlsafe(32)
@@ -101,24 +110,49 @@ class Plugin:
 
     async def list_pdfs(self) -> list[dict[str, Any]]:
         async with self._get_lock():
-            entries = self._scan_pdfs()
-            self._log("debug", "PDF folder scanned", {"count": len(entries)})
+            entries = self._scan_supported_files()
+            self._log("debug", "Library folder scanned", {"count": len(entries)})
             return entries
 
     async def get_pdf_access(self, pdf_id: str) -> dict[str, Any]:
         async with self._get_lock():
             self._validate_pdf_id(pdf_id)
-            self._scan_pdfs()
-            path = self._pdf_index.get(pdf_id)
+            self._scan_supported_files()
+            path = self._file_index.get(pdf_id)
             if path is None:
-                self._log("warning", "PDF access requested for missing file", {"id": pdf_id})
-                raise FileNotFoundError("PDF is no longer available in the configured folder")
+                self._log("warning", "File access requested for missing file", {"id": pdf_id})
+                raise FileNotFoundError("File is no longer available in the configured folder")
+            if path.suffix.lower() != ".pdf":
+                raise ValueError("This file is not a PDF")
 
             await self._start_http_server()
             return {
                 "id": pdf_id,
                 "url": f"http://127.0.0.1:{self._server_port}/pdf/{pdf_id}?token={self._token}",
                 "sizeBytes": path.stat().st_size,
+            }
+
+    async def get_text_content(self, file_id: str) -> dict[str, Any]:
+        async with self._get_lock():
+            self._validate_pdf_id(file_id)
+            self._scan_supported_files()
+            path = self._file_index.get(file_id)
+            if path is None:
+                raise FileNotFoundError("File is no longer available in the configured folder")
+
+            kind = self._kind_for_path(path)
+            if kind == "pdf":
+                raise ValueError("PDF files must be opened through the PDF renderer")
+            if kind == "epub":
+                text = self._extract_epub_text(path)
+            else:
+                text = self._read_plain_text(path)
+
+            return {
+                "id": file_id,
+                "kind": kind,
+                "name": path.name,
+                "text": text,
             }
 
     async def get_pdf_state(self, pdf_id: str) -> dict[str, Any]:
@@ -285,7 +319,7 @@ class Plugin:
             value = 1.0
         return round(min(MAX_ZOOM, max(MIN_ZOOM, value)), 2)
 
-    def _scan_pdfs(self) -> list[dict[str, Any]]:
+    def _scan_supported_files(self) -> list[dict[str, Any]]:
         folder = Path(self._settings["pdfFolder"]).expanduser().resolve()
         folder.mkdir(parents=True, exist_ok=True)
 
@@ -293,11 +327,11 @@ class Plugin:
         index: dict[str, Path] = {}
 
         try:
-            children = list(folder.iterdir())
+            children = list(folder.rglob("*"))
         except Exception as error:
             self._log(
                 "error",
-                "Unable to scan PDF folder",
+                "Unable to scan library folder",
                 {"folder": str(folder), "error": str(error)},
             )
             raise
@@ -306,16 +340,20 @@ class Plugin:
             try:
                 resolved = child.resolve()
                 resolved.relative_to(folder)
-                if not resolved.is_file() or resolved.suffix.lower() != ".pdf":
+                kind = self._kind_for_path(resolved)
+                if not resolved.is_file() or kind is None:
                     continue
 
                 stat = resolved.stat()
                 pdf_id = self._pdf_id(resolved)
                 index[pdf_id] = resolved
+                relative_path = resolved.relative_to(folder).as_posix()
                 entries.append(
                     {
                         "id": pdf_id,
+                        "kind": kind,
                         "name": resolved.name,
+                        "relativePath": relative_path,
                         "sizeBytes": stat.st_size,
                         "modifiedTime": datetime.fromtimestamp(
                             stat.st_mtime, tz=timezone.utc
@@ -325,13 +363,73 @@ class Plugin:
             except Exception as error:
                 self._log(
                     "warning",
-                    "Skipping unreadable PDF folder entry",
+                    "Skipping unreadable library entry",
                     {"entry": str(child), "error": str(error)},
                 )
 
-        entries.sort(key=lambda entry: entry["name"].casefold())
-        self._pdf_index = index
+        entries.sort(key=lambda entry: entry["relativePath"].casefold())
+        self._file_index = index
         return entries
+
+    def _kind_for_path(self, path: Path) -> str | None:
+        return SUPPORTED_EXTENSIONS.get(path.suffix.lower())
+
+    def _read_plain_text(self, path: Path) -> str:
+        size = path.stat().st_size
+        if size > TEXT_SIZE_LIMIT_BYTES:
+            raise ValueError("Text file is too large to preview in the Decky overlay")
+
+        data = path.read_bytes()
+        for encoding in ("utf-8", "utf-16", "latin-1"):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return data.decode("utf-8", errors="replace")
+
+    def _extract_epub_text(self, path: Path) -> str:
+        parts: list[str] = []
+        with zipfile.ZipFile(path) as archive:
+            names = [
+                name
+                for name in archive.namelist()
+                if name.lower().endswith((".xhtml", ".html", ".htm"))
+                and not name.lower().startswith("meta-inf/")
+            ]
+            names.sort()
+            total_chars = 0
+            for name in names[:80]:
+                raw = archive.read(name)
+                if len(raw) > TEXT_SIZE_LIMIT_BYTES:
+                    continue
+                text = self._html_to_text(raw)
+                if not text:
+                    continue
+                parts.append(text)
+                total_chars += len(text)
+                if total_chars >= 250_000:
+                    parts.append("\n[Preview stopped here to keep the Decky overlay responsive.]")
+                    break
+
+        if not parts:
+            raise ValueError("No readable text content was found in this EPUB")
+        return "\n\n".join(parts)
+
+    def _html_to_text(self, raw: bytes) -> str:
+        try:
+            root = ElementTree.fromstring(raw)
+            chunks = [
+                text.strip()
+                for text in root.itertext()
+                if text and text.strip()
+            ]
+            return "\n".join(chunks)
+        except ElementTree.ParseError:
+            decoded = raw.decode("utf-8", errors="replace")
+            stripped = re.sub(r"<(script|style).*?</\1>", "", decoded, flags=re.I | re.S)
+            stripped = re.sub(r"<[^>]+>", "\n", stripped)
+            stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+            return stripped.strip()
 
     def _pdf_id(self, path: Path) -> str:
         normalized_path = str(path.resolve())
@@ -406,10 +504,13 @@ class Plugin:
 
             pdf_id = unquote(parsed.path.removeprefix("/pdf/"))
             self._validate_pdf_id(pdf_id)
-            self._scan_pdfs()
-            path = self._pdf_index.get(pdf_id)
+            self._scan_supported_files()
+            path = self._file_index.get(pdf_id)
             if path is None:
                 await self._send_simple_response(writer, 404, "Not Found", b"Not Found")
+                return
+            if path.suffix.lower() != ".pdf":
+                await self._send_simple_response(writer, 400, "Bad Request", b"Bad Request")
                 return
 
             await self._send_file_response(
