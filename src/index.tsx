@@ -1,0 +1,735 @@
+import {
+  Button,
+  ButtonItem,
+  DropdownItem,
+  Focusable,
+  PanelSection,
+  PanelSectionRow,
+  SliderField,
+  staticClasses
+} from "@decky/ui";
+import { callable, definePlugin, toaster } from "@decky/api";
+import type { CSSProperties, ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FaArrowLeft,
+  FaArrowRight,
+  FaBookmark,
+  FaCog,
+  FaFilePdf,
+  FaHome,
+  FaListUl,
+  FaRegBookmark,
+  FaSearchMinus,
+  FaSearchPlus,
+  FaSyncAlt
+} from "react-icons/fa";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+
+type ViewMode = "single";
+type FitMode = "width";
+
+interface Settings {
+  pdfFolder: string;
+  viewMode: ViewMode;
+  fitMode: FitMode;
+  zoomStep: number;
+}
+
+interface PdfEntry {
+  id: string;
+  name: string;
+  sizeBytes: number;
+  modifiedTime: string;
+}
+
+interface PdfAccess {
+  id: string;
+  url: string;
+  sizeBytes: number;
+}
+
+interface Bookmark {
+  page: number;
+  createdAt: string;
+}
+
+interface PdfState {
+  lastPage: number;
+  zoom: number;
+  bookmarks: Bookmark[];
+}
+
+interface BookmarkToggleResult {
+  bookmarked: boolean;
+  bookmarks: Bookmark[];
+}
+
+interface PdfViewport {
+  width: number;
+  height: number;
+}
+
+interface PdfRenderTask {
+  promise: Promise<void>;
+  cancel: () => void;
+}
+
+interface PdfPageProxy {
+  getViewport: (options: { scale: number }) => PdfViewport;
+  render: (options: {
+    canvasContext: CanvasRenderingContext2D;
+    viewport: PdfViewport;
+  }) => PdfRenderTask;
+}
+
+interface PdfDocumentProxy {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<PdfPageProxy>;
+  destroy?: () => Promise<void>;
+}
+
+const getSettings = callable<[], Settings>("get_settings");
+const saveSettings = callable<[settings: Partial<Settings>], Settings>("save_settings");
+const listPdfs = callable<[], PdfEntry[]>("list_pdfs");
+const getPdfAccess = callable<[pdfId: string], PdfAccess>("get_pdf_access");
+const getPdfState = callable<[pdfId: string], PdfState>("get_pdf_state");
+const savePdfPosition = callable<
+  [pdfId: string, page: number, zoom: number],
+  PdfState
+>("save_pdf_position");
+const toggleBookmark = callable<
+  [pdfId: string, page: number],
+  BookmarkToggleResult
+>("toggle_bookmark");
+const logFrontendEvent = callable<
+  [level: string, message: string, context?: Record<string, unknown>],
+  boolean
+>("log_frontend_event");
+const getLogInfo = callable<
+  [],
+  { logFile: string; logDir: string; settingsFile: string; stateFile: string }
+>("get_log_info");
+
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 4;
+const MAX_CANVAS_PIXELS = 4_000_000;
+const DEFAULT_SETTINGS: Settings = {
+  pdfFolder: "/home/deck/Documents/PDF Seamdeck",
+  viewMode: "single",
+  fitMode: "width",
+  zoomStep: 0.25
+};
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  "./pdf.worker.min.mjs",
+  import.meta.url
+).toString();
+
+const styles = {
+  shell: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px"
+  },
+  toolbar: {
+    display: "grid",
+    gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+    gap: "6px",
+    alignItems: "center"
+  },
+  iconButton: {
+    minWidth: 0,
+    minHeight: "34px",
+    padding: "6px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  pageMeta: {
+    color: "rgba(255, 255, 255, 0.78)",
+    fontSize: "12px",
+    lineHeight: "16px",
+    display: "flex",
+    justifyContent: "space-between",
+    gap: "8px"
+  },
+  viewerFrame: {
+    border: "1px solid rgba(255, 255, 255, 0.12)",
+    borderRadius: "6px",
+    background: "#1b1d22",
+    minHeight: "420px",
+    maxHeight: "620px",
+    overflow: "auto",
+    overscrollBehavior: "contain",
+    touchAction: "pan-x pan-y",
+    padding: "6px"
+  },
+  canvas: {
+    display: "block",
+    margin: "0 auto",
+    background: "#f4f1e8",
+    boxShadow: "0 2px 10px rgba(0, 0, 0, 0.35)"
+  },
+  empty: {
+    minHeight: "220px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    textAlign: "center",
+    color: "rgba(255, 255, 255, 0.72)",
+    padding: "16px",
+    lineHeight: "20px"
+  },
+  error: {
+    border: "1px solid rgba(255, 93, 93, 0.42)",
+    color: "#ffd6d6",
+    background: "rgba(120, 24, 24, 0.34)",
+    borderRadius: "6px",
+    padding: "8px",
+    fontSize: "12px",
+    lineHeight: "16px"
+  },
+  bookmarkList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px"
+  },
+  smallText: {
+    color: "rgba(255, 255, 255, 0.68)",
+    fontSize: "12px",
+    lineHeight: "16px",
+    overflowWrap: "anywhere"
+  }
+} satisfies Record<string, CSSProperties>;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleDateString();
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function IconButton(props: {
+  icon: ReactNode;
+  label: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      disabled={props.disabled}
+      onClick={() => props.onClick()}
+      style={styles.iconButton}
+    >
+      <span aria-hidden="true">{props.icon}</span>
+      <span style={{ display: "none" }}>{props.label}</span>
+    </Button>
+  );
+}
+
+function Content() {
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [pdfs, setPdfs] = useState<PdfEntry[]>([]);
+  const [selectedPdf, setSelectedPdf] = useState<PdfEntry | null>(null);
+  const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [pageCount, setPageCount] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [showBookmarks, setShowBookmarks] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [busyMessage, setBusyMessage] = useState("Loading PDF folder...");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [renderMessage, setRenderMessage] = useState("");
+  const [logPath, setLogPath] = useState("");
+
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const viewerRef = useRef<HTMLDivElement | null>(null);
+  const activeRenderRef = useRef<PdfRenderTask | null>(null);
+
+  const reportError = useCallback(
+    async (
+      message: string,
+      error: unknown,
+      context: Record<string, unknown> = {}
+    ) => {
+      const detail = describeError(error);
+      const composed = `${message}: ${detail}`;
+      console.error("[PDF Viewer]", composed, context);
+      setErrorMessage(composed);
+      toaster.toast({ title: "PDF Viewer", body: message });
+      await logFrontendEvent("error", message, { ...context, error: detail }).catch(
+        () => undefined
+      );
+    },
+    []
+  );
+
+  const refreshLibrary = useCallback(async () => {
+    setBusyMessage("Loading PDF folder...");
+    setErrorMessage("");
+
+    try {
+      const [loadedSettings, loadedPdfs, loadedLogInfo] = await Promise.all([
+        getSettings(),
+        listPdfs(),
+        getLogInfo()
+      ]);
+      setSettings(loadedSettings);
+      setPdfs(loadedPdfs);
+      setLogPath(loadedLogInfo.logFile || loadedLogInfo.logDir);
+      setBusyMessage("");
+
+      if (selectedPdf && !loadedPdfs.some((pdf) => pdf.id === selectedPdf.id)) {
+        setSelectedPdf(null);
+      }
+    } catch (error) {
+      setBusyMessage("");
+      await reportError("Unable to load the PDF folder", error);
+    }
+  }, [reportError, selectedPdf]);
+
+  useEffect(() => {
+    void refreshLibrary();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedPdf) {
+      setPdfDoc(null);
+      setPageCount(0);
+      setPageNumber(1);
+      setBookmarks([]);
+      setRenderMessage("");
+      return () => undefined;
+    }
+
+    let cancelled = false;
+    let openedDoc: PdfDocumentProxy | null = null;
+
+    const openPdf = async () => {
+      setBusyMessage(`Opening ${selectedPdf.name}...`);
+      setErrorMessage("");
+      setRenderMessage("");
+      setPdfDoc(null);
+      setBookmarks([]);
+
+      try {
+        const [access, state] = await Promise.all([
+          getPdfAccess(selectedPdf.id),
+          getPdfState(selectedPdf.id)
+        ]);
+        const loadingTask = pdfjsLib.getDocument({
+          url: access.url,
+          withCredentials: false,
+          rangeChunkSize: 65536,
+          disableAutoFetch: true,
+          disableStream: false
+        });
+        const doc = (await loadingTask.promise) as PdfDocumentProxy;
+
+        if (cancelled) {
+          await doc.destroy?.();
+          return;
+        }
+
+        openedDoc = doc;
+        const safePage = clamp(Math.trunc(state.lastPage || 1), 1, doc.numPages);
+        setPdfDoc(doc);
+        setPageCount(doc.numPages);
+        setPageNumber(safePage);
+        setZoom(clamp(state.zoom || 1, MIN_ZOOM, MAX_ZOOM));
+        setBookmarks(state.bookmarks || []);
+        setBusyMessage("");
+      } catch (error) {
+        setBusyMessage("");
+        await reportError("Unable to open the PDF", error, {
+          pdfId: selectedPdf.id,
+          pdfName: selectedPdf.name
+        });
+      }
+    };
+
+    void openPdf();
+
+    return () => {
+      cancelled = true;
+      activeRenderRef.current?.cancel();
+      void openedDoc?.destroy?.();
+    };
+  }, [reportError, selectedPdf]);
+
+  useEffect(() => {
+    if (!selectedPdf || !pdfDoc) {
+      return () => undefined;
+    }
+
+    const handle = window.setTimeout(() => {
+      void savePdfPosition(selectedPdf.id, pageNumber, zoom).catch((error: unknown) => {
+        void reportError("Unable to save reading position", error, {
+          pdfId: selectedPdf.id,
+          page: pageNumber,
+          zoom
+        });
+      });
+    }, 350);
+
+    return () => window.clearTimeout(handle);
+  }, [pageNumber, pdfDoc, reportError, selectedPdf, zoom]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const viewer = viewerRef.current;
+    if (!canvas || !viewer || !pdfDoc) {
+      return () => undefined;
+    }
+
+    let cancelled = false;
+    activeRenderRef.current?.cancel();
+
+    const renderPage = async () => {
+      setRenderMessage("Rendering page...");
+      try {
+        const page = await pdfDoc.getPage(pageNumber);
+        if (cancelled) {
+          return;
+        }
+
+        const baseViewport = page.getViewport({ scale: 1 });
+        const availableWidth = Math.max(240, viewer.clientWidth - 16);
+        const fitScale = availableWidth / baseViewport.width;
+        const viewport = page.getViewport({ scale: fitScale * zoom });
+        let outputScale = Math.min(window.devicePixelRatio || 1, 2);
+        const requestedPixels = viewport.width * viewport.height * outputScale * outputScale;
+
+        if (requestedPixels > MAX_CANVAS_PIXELS) {
+          outputScale = Math.max(
+            1,
+            Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, viewport.width * viewport.height))
+          );
+        }
+
+        const context = canvas.getContext("2d", { alpha: false });
+        if (!context) {
+          throw new Error("Canvas rendering context is unavailable");
+        }
+
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+        canvas.style.width = `${Math.floor(viewport.width)}px`;
+        canvas.style.height = `${Math.floor(viewport.height)}px`;
+
+        context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, viewport.width, viewport.height);
+
+        const renderTask = page.render({ canvasContext: context, viewport });
+        activeRenderRef.current = renderTask;
+        await renderTask.promise;
+
+        if (!cancelled) {
+          setRenderMessage("");
+        }
+      } catch (error) {
+        if (!cancelled && !describeError(error).toLowerCase().includes("cancel")) {
+          setRenderMessage("");
+          await reportError("Unable to render this page", error, {
+            pdfId: selectedPdf?.id,
+            page: pageNumber
+          });
+        }
+      }
+    };
+
+    void renderPage();
+
+    return () => {
+      cancelled = true;
+      activeRenderRef.current?.cancel();
+    };
+  }, [pageNumber, pdfDoc, reportError, selectedPdf?.id, zoom]);
+
+  const pdfOptions = useMemo(
+    () =>
+      pdfs.map((pdf) => ({
+        data: pdf.id,
+        label: `${pdf.name} (${formatBytes(pdf.sizeBytes)})`
+      })),
+    [pdfs]
+  );
+
+  const selectedPdfId = selectedPdf?.id ?? "";
+  const currentPdfDescription = selectedPdf
+    ? `${formatBytes(selectedPdf.sizeBytes)} • modified ${formatDate(selectedPdf.modifiedTime)}`
+    : settings.pdfFolder;
+  const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
+
+  const selectPdf = (pdfId: string) => {
+    const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
+    setSelectedPdf(pdf);
+    setShowBookmarks(false);
+    setShowSettings(false);
+  };
+
+  const goHome = () => {
+    setSelectedPdf(null);
+    setShowBookmarks(false);
+    setShowSettings(false);
+    setErrorMessage("");
+  };
+
+  const changePage = (nextPage: number) => {
+    setPageNumber(clamp(Math.trunc(nextPage), 1, Math.max(1, pageCount)));
+    viewerRef.current?.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+  };
+
+  const changeZoom = (nextZoom: number) => {
+    setZoom(clamp(Number(nextZoom.toFixed(2)), MIN_ZOOM, MAX_ZOOM));
+  };
+
+  const onToggleBookmark = async () => {
+    if (!selectedPdf) {
+      return;
+    }
+
+    try {
+      const result = await toggleBookmark(selectedPdf.id, pageNumber);
+      setBookmarks(result.bookmarks);
+      toaster.toast({
+        title: "PDF Viewer",
+        body: result.bookmarked ? `Bookmarked page ${pageNumber}` : `Removed page ${pageNumber}`
+      });
+    } catch (error) {
+      await reportError("Unable to update bookmark", error, {
+        pdfId: selectedPdf.id,
+        page: pageNumber
+      });
+    }
+  };
+
+  const saveZoomStep = async (value: number) => {
+    const nextSettings = await saveSettings({ zoomStep: value });
+    setSettings(nextSettings);
+  };
+
+  return (
+    <div style={styles.shell}>
+      <PanelSection title="PDF Folder">
+        <PanelSectionRow>
+          <DropdownItem
+            label="PDF folder"
+            description={currentPdfDescription}
+            rgOptions={pdfOptions}
+            selectedOption={selectedPdfId}
+            disabled={pdfOptions.length === 0}
+            strDefaultLabel={pdfOptions.length === 0 ? "No PDFs found" : "Choose a PDF"}
+            menuLabel="PDFs"
+            onMenuWillOpen={(showMenu) => {
+              void refreshLibrary().finally(showMenu);
+            }}
+            onChange={(option) => {
+              selectPdf(String(option.data));
+            }}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div style={styles.smallText}>{settings.pdfFolder}</div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="inline" onClick={() => void refreshLibrary()}>
+            <FaSyncAlt /> Refresh PDF list
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+
+      {errorMessage ? <div style={styles.error}>{errorMessage}</div> : null}
+
+      {!selectedPdf ? (
+        <PanelSection>
+          <PanelSectionRow>
+            <div style={styles.empty}>
+              {busyMessage ||
+                (pdfs.length === 0
+                  ? "Add PDF guides to the folder above, then refresh."
+                  : "Choose a PDF from the folder dropdown.")}
+            </div>
+          </PanelSectionRow>
+        </PanelSection>
+      ) : (
+        <>
+          <PanelSection title={selectedPdf.name}>
+            <PanelSectionRow>
+              <div style={styles.toolbar}>
+                <IconButton
+                  label="Home"
+                  icon={<FaHome />}
+                  onClick={goHome}
+                />
+                <IconButton
+                  label="Previous page"
+                  icon={<FaArrowLeft />}
+                  disabled={!pdfDoc || pageNumber <= 1}
+                  onClick={() => changePage(pageNumber - 1)}
+                />
+                <IconButton
+                  label="Next page"
+                  icon={<FaArrowRight />}
+                  disabled={!pdfDoc || pageNumber >= pageCount}
+                  onClick={() => changePage(pageNumber + 1)}
+                />
+                <IconButton
+                  label="Zoom out"
+                  icon={<FaSearchMinus />}
+                  disabled={!pdfDoc || zoom <= MIN_ZOOM}
+                  onClick={() => changeZoom(zoom - settings.zoomStep)}
+                />
+                <IconButton
+                  label="Zoom in"
+                  icon={<FaSearchPlus />}
+                  disabled={!pdfDoc || zoom >= MAX_ZOOM}
+                  onClick={() => changeZoom(zoom + settings.zoomStep)}
+                />
+                <IconButton
+                  label="Bookmark page"
+                  icon={isCurrentPageBookmarked ? <FaBookmark /> : <FaRegBookmark />}
+                  disabled={!pdfDoc}
+                  onClick={() => void onToggleBookmark()}
+                />
+                <IconButton
+                  label="Settings"
+                  icon={<FaCog />}
+                  onClick={() => setShowSettings((visible) => !visible)}
+                />
+              </div>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <div style={styles.pageMeta}>
+                <span>
+                  Page {pageCount ? pageNumber : "-"} of {pageCount || "-"}
+                </span>
+                <span>{Math.round(zoom * 100)}%</span>
+              </div>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem
+                layout="inline"
+                icon={<FaListUl />}
+                onClick={() => setShowBookmarks((visible) => !visible)}
+              >
+                {bookmarks.length === 0
+                  ? "No bookmarks"
+                  : `${bookmarks.length} bookmark${bookmarks.length === 1 ? "" : "s"}`}
+              </ButtonItem>
+            </PanelSectionRow>
+          </PanelSection>
+
+          {showSettings ? (
+            <PanelSection title="Settings">
+              <PanelSectionRow>
+                <SliderField
+                  label="Zoom step"
+                  value={Math.round(settings.zoomStep * 100)}
+                  min={5}
+                  max={100}
+                  step={5}
+                  valueSuffix="%"
+                  showValue
+                  onChange={(value) => {
+                    void saveZoomStep(clamp(value / 100, 0.05, 1));
+                  }}
+                />
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <div style={styles.smallText}>
+                  View mode: single page. Continuous scroll is intentionally disabled in v1
+                  to keep large guides responsive in the Decky overlay.
+                </div>
+              </PanelSectionRow>
+              {logPath ? (
+                <PanelSectionRow>
+                  <div style={styles.smallText}>Log: {logPath}</div>
+                </PanelSectionRow>
+              ) : null}
+            </PanelSection>
+          ) : null}
+
+          {showBookmarks ? (
+            <PanelSection title="Bookmarks">
+              <PanelSectionRow>
+                <div style={styles.bookmarkList}>
+                  {bookmarks.length === 0 ? (
+                    <div style={styles.smallText}>No pages bookmarked for this PDF.</div>
+                  ) : (
+                    bookmarks.map((bookmark) => (
+                      <Button
+                        key={`${selectedPdf.id}-${bookmark.page}`}
+                        onClick={() => changePage(bookmark.page)}
+                      >
+                        Page {bookmark.page}
+                      </Button>
+                    ))
+                  )}
+                </div>
+              </PanelSectionRow>
+            </PanelSection>
+          ) : null}
+
+          <PanelSection>
+            <PanelSectionRow>
+              <Focusable style={styles.viewerFrame} ref={viewerRef}>
+                {busyMessage ? <div style={styles.empty}>{busyMessage}</div> : null}
+                {renderMessage && !busyMessage ? (
+                  <div style={styles.smallText}>{renderMessage}</div>
+                ) : null}
+                <canvas
+                  ref={canvasRef}
+                  style={{
+                    ...styles.canvas,
+                    visibility: pdfDoc ? "visible" : "hidden"
+                  }}
+                />
+              </Focusable>
+            </PanelSectionRow>
+          </PanelSection>
+        </>
+      )}
+    </div>
+  );
+}
+
+export default definePlugin(() => {
+  return {
+    name: "PDF Viewer",
+    titleView: <div className={staticClasses.Title}>PDF Viewer</div>,
+    content: <Content />,
+    icon: <FaFilePdf />
+  };
+});
