@@ -21,7 +21,7 @@ async function copyIntoStage(source, target = source) {
 }
 
 await ensureExists(join(root, "dist", "index.js"));
-await ensureExists(join(root, "dist", "pdf.worker.min.mjs"));
+await ensureExists(join(root, "dist", "pdf.worker.min.js"));
 
 await rm(outDir, { recursive: true, force: true });
 await mkdir(stageDir, { recursive: true });

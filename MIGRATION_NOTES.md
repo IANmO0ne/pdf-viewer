@@ -14,5 +14,5 @@ This project replaces the earlier `IANmO0ne/pdf-viewer` prototype while keeping 
 ## What Was Preserved
 
 - The plugin remains a Decky Quick Access Menu reader named `PDF Viewer`.
-- The useful worker-fallback idea from the prototype is documented as a future fallback if Steam Deck testing shows `dist/pdf.worker.min.mjs` cannot be loaded reliably.
+- The useful worker-fallback idea from the prototype is documented as a future fallback if Steam Deck testing shows `dist/pdf.worker.min.js` cannot be loaded reliably.
 - The resume behavior was expanded from one global last page to per-PDF last page, zoom, and bookmarks.

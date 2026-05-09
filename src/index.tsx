@@ -26,7 +26,7 @@ import {
   FaSearchPlus,
   FaSyncAlt
 } from "react-icons/fa";
-import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
 
 type ViewMode = "single";
 type FitMode = "width";
@@ -136,7 +136,7 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  "./pdf.worker.min.mjs",
+  "./pdf.worker.min.js",
   import.meta.url
 ).toString();
 

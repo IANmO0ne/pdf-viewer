@@ -54,7 +54,7 @@ python -m pip install -r requirements-dev.txt
 
 The plugin intentionally ships with single-page PDF rendering. Continuous scroll and search are future features because large strategy guides can be expensive to render inside the Decky side panel.
 
-If Decky cannot load `dist/pdf.worker.min.mjs` on the Steam Deck, the previous project's blob-worker approach can be added as a fallback. That is intentionally deferred until real Deck testing shows it is needed.
+If Decky cannot load `dist/pdf.worker.min.js` on the Steam Deck, the previous project's blob-worker approach can be added as a fallback. That is intentionally deferred until real Deck testing shows it is needed.
 
 ## Logs And State
 
