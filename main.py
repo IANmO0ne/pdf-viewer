@@ -42,6 +42,8 @@ SUPPORTED_EXTENSIONS = {
     ".md": "text",
 }
 TEXT_SIZE_LIMIT_BYTES = 2 * 1024 * 1024
+MAX_LIBRARY_FILES = 2_000
+MAX_SCAN_DIRS = 750
 
 
 def utc_now() -> str:
@@ -366,6 +368,22 @@ class Plugin:
         for name in COMMON_LIBRARY_FOLDER_NAMES:
             candidates.append(documents_folder / name)
 
+        try:
+            if documents_folder.exists() and documents_folder.is_dir():
+                for child in documents_folder.iterdir():
+                    try:
+                        if child.is_dir() and not child.is_symlink():
+                            candidates.append(child)
+                    except OSError:
+                        continue
+                candidates.append(documents_folder)
+        except OSError as error:
+            self._log(
+                "warning",
+                "Unable to inspect Documents folder for library candidates",
+                {"folder": str(documents_folder), "error": str(error)},
+            )
+
         unique: list[Path] = []
         seen: set[str] = set()
         for candidate in candidates:
@@ -384,21 +402,8 @@ class Plugin:
             return 0
 
         count = 0
-        try:
-            for child in folder.rglob("*"):
-                try:
-                    if child.is_file() and self._kind_for_path(child) is not None:
-                        count += 1
-                        if count >= limit:
-                            break
-                except OSError:
-                    continue
-        except OSError as error:
-            self._log(
-                "warning",
-                "Unable to count supported files in candidate folder",
-                {"folder": str(folder), "error": str(error)},
-            )
+        for _path, _kind in self._iter_supported_files(folder, file_limit=limit):
+            count += 1
         return count
 
     def _auto_select_library_folder(self) -> bool:
@@ -411,7 +416,11 @@ class Plugin:
         best_count = 0
         for candidate in self._candidate_library_folders():
             count = self._count_supported_files(candidate)
-            if count > best_count:
+            if count > best_count or (
+                count == best_count
+                and best_folder is not None
+                and len(candidate.parts) > len(best_folder.parts)
+            ):
                 best_folder = candidate
                 best_count = count
 
@@ -438,6 +447,69 @@ class Plugin:
         )
         return True
 
+    def _iter_supported_files(
+        self,
+        folder: Path,
+        file_limit: int = MAX_LIBRARY_FILES,
+        dir_limit: int = MAX_SCAN_DIRS,
+    ):
+        stack = [folder]
+        scanned_dirs = 0
+        yielded_files = 0
+
+        while stack:
+            current = stack.pop()
+            scanned_dirs += 1
+            if scanned_dirs > dir_limit:
+                self._log(
+                    "warning",
+                    "Library scan stopped after directory limit",
+                    {"folder": str(folder), "dirLimit": dir_limit},
+                )
+                return
+
+            try:
+                with os.scandir(current) as iterator:
+                    children = sorted(iterator, key=lambda entry: entry.name.casefold())
+            except OSError as error:
+                self._log(
+                    "warning",
+                    "Unable to scan library directory",
+                    {"folder": str(current), "error": str(error)},
+                )
+                continue
+
+            for entry in reversed(children):
+                try:
+                    if entry.is_symlink():
+                        continue
+                    entry_path = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry_path)
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+
+                    kind = self._kind_for_path(entry_path)
+                    if kind is None:
+                        continue
+
+                    yielded_files += 1
+                    if yielded_files > file_limit:
+                        self._log(
+                            "warning",
+                            "Library scan stopped after file limit",
+                            {"folder": str(folder), "fileLimit": file_limit},
+                        )
+                        return
+                    yield entry_path, kind
+                except OSError as error:
+                    self._log(
+                        "warning",
+                        "Skipping unreadable library entry",
+                        {"entry": entry.path, "error": str(error)},
+                    )
+
     def _scan_supported_files(self) -> list[dict[str, Any]]:
         folder = Path(self._settings["pdfFolder"]).expanduser().resolve()
         folder.mkdir(parents=True, exist_ok=True)
@@ -445,22 +517,11 @@ class Plugin:
         entries: list[dict[str, Any]] = []
         index: dict[str, Path] = {}
 
-        try:
-            children = list(folder.rglob("*"))
-        except Exception as error:
-            self._log(
-                "error",
-                "Unable to scan library folder",
-                {"folder": str(folder), "error": str(error)},
-            )
-            raise
-
-        for child in children:
+        for child, kind in self._iter_supported_files(folder):
             try:
                 resolved = child.resolve()
                 resolved.relative_to(folder)
-                kind = self._kind_for_path(resolved)
-                if not resolved.is_file() or kind is None:
+                if not resolved.is_file():
                     continue
 
                 stat = resolved.stat()

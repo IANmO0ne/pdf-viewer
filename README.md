@@ -7,7 +7,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 ## V1 Features
 
 - Recursively lists `.pdf`, `.epub`, `.txt`, and `.md` files from `/home/deck/Documents/PDF Seamdeck`
-- Auto-detects common alternate folder names such as `/home/deck/Documents/PDF Steamdeck` when the configured folder is empty
+- Auto-detects common alternate folder names and guide folders under `/home/deck/Documents` when the configured folder is empty
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out, panning, bookmarks, and bookmark navigation
@@ -20,6 +20,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 
 1. Put your guides in `/home/deck/Documents/PDF Seamdeck`.
    If you already made a similar folder such as `/home/deck/Documents/PDF Steamdeck`, the plugin will auto-select it when it finds supported files there.
+   The empty-library screen shows which folders were checked and how many supported files were found.
 2. Build the plugin from this repository:
 
    ```sh

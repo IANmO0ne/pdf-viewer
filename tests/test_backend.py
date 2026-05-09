@@ -116,6 +116,27 @@ def test_common_folder_with_files_is_auto_selected(plugin_module):
     )
 
 
+def test_documents_child_folder_with_files_is_auto_selected(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+
+    async def exercise():
+        default_folder = Path(module.DEFAULT_PDF_FOLDER)
+        arbitrary_folder = default_folder.parent / "Guides I Copied"
+        arbitrary_folder.mkdir(parents=True)
+        (arbitrary_folder / "walkthrough.txt").write_text("Use the key.", encoding="utf-8")
+
+        await plugin._main()
+        settings = await plugin.get_settings()
+        entries = await plugin.list_pdfs()
+        await plugin._unload()
+        return settings, entries
+
+    settings, entries = run(exercise())
+    assert Path(settings["pdfFolder"]).name == "Guides I Copied"
+    assert [entry["relativePath"] for entry in entries] == ["walkthrough.txt"]
+
+
 def test_text_content_loads_for_text_files(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()

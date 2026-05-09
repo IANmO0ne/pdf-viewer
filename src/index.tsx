@@ -289,6 +289,25 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: number | undefined;
+  const guardedPromise = promise.finally(() => {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  });
+
+  guardedPromise.catch(() => undefined);
+
+  const timeoutPromise = new Promise<T>((_resolve, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+  });
+
+  return Promise.race([guardedPromise, timeoutPromise]);
+}
+
 function fileIcon(kind: LibraryKind) {
   if (kind === "pdf") {
     return <FaFilePdf />;
@@ -372,7 +391,11 @@ function Content() {
     setErrorMessage("");
 
     try {
-      const loadedPdfs = await listPdfs();
+      const loadedPdfs = await withTimeout(
+        listPdfs(),
+        15_000,
+        "Library scan took longer than 15 seconds"
+      );
       const [loadedSettings, loadedLogInfo, loadedDiagnostics] = await Promise.all([
         getSettings(),
         getLogInfo(),
@@ -421,7 +444,11 @@ function Content() {
 
       try {
         if (selectedPdf.kind !== "pdf") {
-          const content = await getTextContent(selectedPdf.id);
+          const content = await withTimeout(
+            getTextContent(selectedPdf.id),
+            10_000,
+            "Text loading took longer than 10 seconds"
+          );
           if (cancelled) {
             return;
           }
@@ -435,7 +462,11 @@ function Content() {
         }
 
         const [access, state] = await Promise.all([
-          getPdfAccess(selectedPdf.id),
+          withTimeout(
+            getPdfAccess(selectedPdf.id),
+            10_000,
+            "PDF access request took longer than 10 seconds"
+          ),
           getPdfState(selectedPdf.id)
         ]);
         const loadingTask = pdfjsLib.getDocument({
@@ -445,7 +476,17 @@ function Content() {
           disableAutoFetch: true,
           disableStream: false
         });
-        const doc = (await loadingTask.promise) as PdfDocumentProxy;
+        let doc: PdfDocumentProxy;
+        try {
+          doc = (await withTimeout(
+            loadingTask.promise as Promise<PdfDocumentProxy>,
+            20_000,
+            "PDF loading took longer than 20 seconds"
+          )) as PdfDocumentProxy;
+        } catch (error) {
+          await loadingTask.destroy?.().catch(() => undefined);
+          throw error;
+        }
 
         if (cancelled) {
           await doc.destroy?.();
