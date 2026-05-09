@@ -100,8 +100,8 @@ def test_common_folder_with_files_is_auto_selected(plugin_module):
         (alternate_folder / "guide.pdf").write_bytes(b"%PDF-1.7\n")
 
         await plugin._main()
-        settings = await plugin.get_settings()
         entries = await plugin.list_pdfs()
+        settings = await plugin.get_settings()
         diagnostics = await plugin.get_library_diagnostics()
         await plugin._unload()
         return settings, entries, diagnostics
@@ -127,8 +127,8 @@ def test_documents_child_folder_with_files_is_auto_selected(plugin_module):
         (arbitrary_folder / "walkthrough.txt").write_text("Use the key.", encoding="utf-8")
 
         await plugin._main()
-        settings = await plugin.get_settings()
         entries = await plugin.list_pdfs()
+        settings = await plugin.get_settings()
         await plugin._unload()
         return settings, entries
 

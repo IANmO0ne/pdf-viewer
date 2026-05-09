@@ -8,6 +8,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 
 - Recursively lists `.pdf`, `.epub`, `.txt`, and `.md` files from `/home/deck/Documents/PDF Seamdeck`
 - Auto-detects common alternate folder names and guide folders under `/home/deck/Documents` when the configured folder is empty
+- Uses bounded folder scans so a large or unreadable directory cannot leave the Decky panel stuck on loading forever
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out, panning, bookmarks, and bookmark navigation

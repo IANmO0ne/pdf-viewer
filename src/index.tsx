@@ -396,11 +396,18 @@ function Content() {
         15_000,
         "Library scan took longer than 15 seconds"
       );
-      const [loadedSettings, loadedLogInfo, loadedDiagnostics] = await Promise.all([
+      const [loadedSettings, loadedLogInfo] = await Promise.all([
         getSettings(),
-        getLogInfo(),
-        getLibraryDiagnostics().catch(() => null)
+        getLogInfo()
       ]);
+      const loadedDiagnostics =
+        loadedPdfs.length === 0
+          ? await withTimeout(
+              getLibraryDiagnostics(),
+              3_000,
+              "Library diagnostics took longer than 3 seconds"
+            ).catch(() => null)
+          : null;
       setSettings(loadedSettings);
       setPdfs(loadedPdfs);
       setLogPath(loadedLogInfo.logFile || loadedLogInfo.logDir);
