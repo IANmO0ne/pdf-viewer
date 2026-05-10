@@ -18,6 +18,7 @@ import {
   FaFileAlt,
   FaBookOpen,
   FaFilePdf,
+  FaFont,
   FaHome,
   FaListUl,
   FaRegBookmark,
@@ -139,7 +140,7 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.19";
+const FRONTEND_BUILD = "0.1.20";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
@@ -172,7 +173,7 @@ const styles = {
   },
   toolbar: {
     display: "grid",
-    gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
     gap: "6px",
     alignItems: "center"
   },
@@ -290,13 +291,19 @@ function describeError(error: unknown): string {
 }
 
 function isStructuralPdfError(error: unknown): boolean {
-  const detail = describeError(error).toLowerCase();
+  return isPdfIntegrityMessage(describeError(error));
+}
+
+function isPdfIntegrityMessage(message: string): boolean {
+  const detail = message.toLowerCase();
   return (
     detail.includes("invalid root reference") ||
     detail.includes("invalid pdf structure") ||
     detail.includes("xref") ||
     detail.includes("trailer") ||
-    detail.includes("catalog")
+    detail.includes("catalog") ||
+    detail.includes("corrupt") ||
+    detail.includes("damaged")
   );
 }
 
@@ -472,6 +479,7 @@ function Content() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const activeRenderRef = useRef<PdfRenderTask | null>(null);
+  const reopenPositionRef = useRef<{ page: number; zoom: number } | null>(null);
 
   const reportError = useCallback(
     async (
@@ -584,11 +592,17 @@ function Content() {
         }
 
         openedDoc = doc;
-        const safePage = clamp(Math.trunc(state.lastPage || 1), 1, doc.numPages);
+        const reopenPosition = reopenPositionRef.current;
+        reopenPositionRef.current = null;
+        const safePage = clamp(
+          Math.trunc(reopenPosition?.page || state.lastPage || 1),
+          1,
+          doc.numPages
+        );
         setPdfDoc(doc);
         setPageCount(doc.numPages);
         setPageNumber(safePage);
-        setZoom(clamp(state.zoom || 1, MIN_ZOOM, MAX_ZOOM));
+        setZoom(clamp(reopenPosition?.zoom || state.zoom || 1, MIN_ZOOM, MAX_ZOOM));
         setBookmarks(state.bookmarks || []);
         setBusyMessage("");
       } catch (error) {
@@ -693,6 +707,7 @@ function Content() {
 
         if (!useCompatibilityRenderer) {
           setRenderMessage("Retrying with compatibility renderer...");
+          reopenPositionRef.current = { page: pageNumber, zoom };
           await withTimeout(
             logFrontendEvent("warning", "Retrying PDF render with compatibility renderer", {
               pdfId: selectedPdf?.id,
@@ -728,6 +743,8 @@ function Content() {
   const visibleFiles = pdfs.slice(0, 150);
   const backendVersion = pluginStatus?.version || "not connected";
   const backendIsConnected = Boolean(pluginStatus);
+  const showPdfIntegrityHint =
+    selectedPdf?.kind === "pdf" && errorMessage && isPdfIntegrityMessage(errorMessage);
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -752,6 +769,15 @@ function Content() {
 
   const changeZoom = (nextZoom: number) => {
     setZoom(clamp(Number(nextZoom.toFixed(2)), MIN_ZOOM, MAX_ZOOM));
+  };
+
+  const toggleFontRepair = () => {
+    reopenPositionRef.current = { page: pageNumber, zoom };
+    setErrorMessage("");
+    setRenderMessage(
+      useCompatibilityRenderer ? "Reloading normal renderer..." : "Reloading font repair renderer..."
+    );
+    setUseCompatibilityRenderer((enabled) => !enabled);
   };
 
   const onToggleBookmark = async () => {
@@ -815,6 +841,13 @@ function Content() {
                 {BACKEND_LOG_COMMAND}
               </div>
             </>
+          ) : null}
+          {showPdfIntegrityHint ? (
+            <div style={{ marginTop: "6px" }}>
+              This PDF may be corrupted or malformed. Check it in another PDF reader,
+              re-download or re-save it if possible, and report this file with the plugin log
+              if it opens elsewhere.
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -891,6 +924,12 @@ function Content() {
                   onClick={() => void onToggleBookmark()}
                 />
                 <IconButton
+                  label="Font repair"
+                  icon={<FaFont />}
+                  disabled={selectedPdf.kind !== "pdf"}
+                  onClick={toggleFontRepair}
+                />
+                <IconButton
                   label="Settings"
                   icon={<FaCog />}
                   onClick={() => setShowSettings((visible) => !visible)}
@@ -910,7 +949,7 @@ function Content() {
             {useCompatibilityRenderer ? (
               <PanelSectionRow>
                 <div style={styles.smallText}>
-                  Compatibility renderer active for this PDF.
+                  Font repair renderer active for this PDF.
                 </div>
               </PanelSectionRow>
             ) : null}
@@ -949,6 +988,17 @@ function Content() {
                   View mode: single page. Continuous scroll is intentionally disabled in v1
                   to keep large guides responsive in the Decky overlay.
                 </div>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  icon={<FaFont />}
+                  disabled={selectedPdf.kind !== "pdf"}
+                  description="Try this when a PDF page shows square blocks instead of text."
+                  onClick={toggleFontRepair}
+                >
+                  Font repair: {useCompatibilityRenderer ? "On" : "Off"}
+                </ButtonItem>
               </PanelSectionRow>
             </PanelSection>
           ) : null}
