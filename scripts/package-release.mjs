@@ -34,7 +34,7 @@ await copyIntoStage("dist/index.js");
 await copyIntoStage("dist/pdf.worker.min.js");
 
 const output = createWriteStream(zipPath);
-const archive = archiver("zip", { store: true });
+const archive = archiver("zip", { zlib: { level: 9 } });
 
 const done = new Promise((resolveDone, rejectDone) => {
   output.on("close", resolveDone);
