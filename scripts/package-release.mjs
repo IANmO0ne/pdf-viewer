@@ -22,6 +22,8 @@ async function copyIntoStage(source, target = source) {
 
 await ensureExists(join(root, "dist", "index.js"));
 await ensureExists(join(root, "dist", "pdf.worker.min.js"));
+await ensureExists(join(root, "dist", "standard_fonts"));
+await ensureExists(join(root, "dist", "cmaps"));
 
 await rm(outDir, { recursive: true, force: true });
 await mkdir(stageDir, { recursive: true });
@@ -32,6 +34,8 @@ await copyIntoStage("main.py");
 await copyIntoStage("LICENSE");
 await copyIntoStage("dist/index.js");
 await copyIntoStage("dist/pdf.worker.min.js");
+await copyIntoStage("dist/standard_fonts");
+await copyIntoStage("dist/cmaps");
 
 const output = createWriteStream(zipPath);
 const archive = archiver("zip", { zlib: { level: 9 } });

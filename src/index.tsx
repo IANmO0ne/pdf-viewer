@@ -1,7 +1,6 @@
 import {
   Button,
   ButtonItem,
-  DropdownItem,
   Focusable,
   PanelSection,
   PanelSectionRow,
@@ -10,7 +9,7 @@ import {
 } from "@decky/ui";
 import { call, definePlugin, toaster } from "@decky/api";
 import type { CSSProperties, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FaArrowLeft,
   FaArrowRight,
@@ -132,7 +131,7 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.16";
+const FRONTEND_BUILD = "0.1.17";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
@@ -147,6 +146,11 @@ const DEFAULT_SETTINGS: Settings = {
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "./pdf.worker.min.js",
+  import.meta.url
+).toString();
+const PDFJS_CMAP_URL = new URL("./cmaps/", import.meta.url).toString();
+const PDFJS_STANDARD_FONT_DATA_URL = new URL(
+  "./standard_fonts/",
   import.meta.url
 ).toString();
 
@@ -268,14 +272,6 @@ function formatBytes(value: number): string {
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
-function formatDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return date.toLocaleDateString();
-}
-
 function describeError(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -381,28 +377,6 @@ function Content() {
     []
   );
 
-  const refreshLibrary = useCallback(async () => {
-    setBusyMessage("Loading PDF folder...");
-    setErrorMessage("");
-
-    try {
-      const loadedPdfs = await withTimeout(
-        listPdfs(),
-        8_000,
-        "Library scan took longer than 8 seconds"
-      );
-      setPdfs(loadedPdfs);
-      setBusyMessage("");
-
-      if (selectedPdf && !loadedPdfs.some((pdf) => pdf.id === selectedPdf.id)) {
-        setSelectedPdf(null);
-      }
-    } catch (error) {
-      setBusyMessage("");
-      await reportError("Unable to load the PDF folder", error);
-    }
-  }, [reportError, selectedPdf]);
-
   const loadLibrary = useCallback(async () => {
     setBusyMessage("Connecting to PDF Viewer...");
     setErrorMessage("");
@@ -487,7 +461,12 @@ function Content() {
           withCredentials: false,
           rangeChunkSize: 65536,
           disableAutoFetch: true,
-          disableStream: false
+          disableStream: false,
+          cMapUrl: PDFJS_CMAP_URL,
+          cMapPacked: true,
+          standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL,
+          disableFontFace: false,
+          stopAtErrors: false
         });
         let doc: PdfDocumentProxy;
         try {
@@ -622,30 +601,11 @@ function Content() {
     };
   }, [pageNumber, pdfDoc, reportError, selectedPdf?.id, zoom]);
 
-  const pdfOptions = useMemo(
-    () =>
-      pdfs.slice(0, 50).map((pdf) => ({
-        data: pdf.id,
-        label: `${fileKindLabel(pdf.kind)} · ${pdf.relativePath || pdf.name} (${formatBytes(pdf.sizeBytes)})`
-      })),
-    [pdfs]
-  );
-
-  const selectedPdfId = selectedPdf?.id ?? "";
   const currentFolder = settings.pdfFolder;
-  const currentPdfDescription = selectedPdf
-    ? `${formatBytes(selectedPdf.sizeBytes)} • modified ${formatDate(selectedPdf.modifiedTime)}`
-    : currentFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
   const visibleFiles = pdfs.slice(0, 150);
   const backendVersion = pluginStatus?.version || "not connected";
   const backendIsConnected = Boolean(pluginStatus);
-  const pickerLabel =
-    !backendIsConnected && errorMessage
-      ? "Backend not connected"
-      : pdfOptions.length === 0
-        ? "No supported files found"
-        : "Choose a file";
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -699,30 +659,6 @@ function Content() {
     <div style={styles.shell}>
       <PanelSection title="PDF Folder">
         <PanelSectionRow>
-          <DropdownItem
-            label="Quick picker"
-            description={currentPdfDescription}
-            rgOptions={pdfOptions}
-            selectedOption={selectedPdfId}
-            disabled={pdfOptions.length === 0}
-            strDefaultLabel={pickerLabel}
-            menuLabel="Library"
-            onMenuWillOpen={(showMenu) => {
-              void refreshLibrary().finally(showMenu);
-            }}
-            onChange={(option) => {
-              selectPdf(String(option.data));
-            }}
-          />
-        </PanelSectionRow>
-        {pdfs.length > 50 ? (
-          <PanelSectionRow>
-            <div style={styles.smallText}>
-              The dropdown shows the first 50 files. Use the file list below for the full library.
-            </div>
-          </PanelSectionRow>
-        ) : null}
-        <PanelSectionRow>
           <div style={styles.smallText}>{currentFolder}</div>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -766,7 +702,7 @@ function Content() {
               {busyMessage ||
                 (pdfs.length === 0
                   ? "Add PDF, EPUB, TXT, or MD files to the folder above, then refresh."
-                  : "Choose a file below or from the folder dropdown.")}
+                  : "Choose a file below.")}
             </div>
           </PanelSectionRow>
           {pdfs.length > 0 ? (

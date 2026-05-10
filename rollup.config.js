@@ -1,24 +1,38 @@
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { cpSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import deckyPlugin from "@decky/rollup";
 
-function copyPdfWorker() {
+function copyPdfjsAssets() {
   return {
-    name: "copy-pdfjs-worker",
+    name: "copy-pdfjs-assets",
     writeBundle() {
       const source = resolve("node_modules/pdfjs-dist/legacy/build/pdf.worker.min.js");
       const target = resolve("dist/pdf.worker.min.js");
+      const standardFontsSource = resolve("node_modules/pdfjs-dist/standard_fonts");
+      const standardFontsTarget = resolve("dist/standard_fonts");
+      const cMapsSource = resolve("node_modules/pdfjs-dist/cmaps");
+      const cMapsTarget = resolve("dist/cmaps");
 
       if (!existsSync(source)) {
         throw new Error(`Missing PDF.js worker at ${source}`);
       }
+      if (!existsSync(standardFontsSource)) {
+        throw new Error(`Missing PDF.js standard fonts at ${standardFontsSource}`);
+      }
+      if (!existsSync(cMapsSource)) {
+        throw new Error(`Missing PDF.js CMaps at ${cMapsSource}`);
+      }
 
       mkdirSync(dirname(target), { recursive: true });
       copyFileSync(source, target);
+      rmSync(standardFontsTarget, { recursive: true, force: true });
+      rmSync(cMapsTarget, { recursive: true, force: true });
+      cpSync(standardFontsSource, standardFontsTarget, { recursive: true });
+      cpSync(cMapsSource, cMapsTarget, { recursive: true });
     }
   };
 }
 
 export default deckyPlugin({
-  plugins: [copyPdfWorker()]
+  plugins: [copyPdfjsAssets()]
 });
