@@ -78,19 +78,6 @@ interface TextContent {
   text: string;
 }
 
-interface LibraryCandidate {
-  folder: string;
-  exists: boolean;
-  supportedCount: number;
-}
-
-interface LibraryDiagnostics {
-  activeFolder: string;
-  activeExists: boolean;
-  supportedExtensions: string[];
-  candidates: LibraryCandidate[];
-}
-
 interface DebugEntry {
   name: string;
   isFile?: boolean;
@@ -125,8 +112,31 @@ interface DebugInfo {
 interface PluginStatus {
   version: string;
   timestamp: string;
-  activeFolder: string;
-  lastScan: DebugInfo["lastScan"];
+}
+
+interface SettingsStatus {
+  version: string;
+  timestamp: string;
+  ok: boolean;
+  settingsFile: string;
+  settingsExists: boolean;
+  stateFile: string;
+  logDir: string;
+  pdfFolder: string;
+  error: string;
+}
+
+interface FolderProbe {
+  version: string;
+  timestamp: string;
+  folder: string;
+  supportedExtensions: string[];
+  probe: DebugInfo["probe"];
+}
+
+interface FrontendStatus {
+  ok: boolean;
+  timestamp: string;
 }
 
 interface PdfViewport {
@@ -153,7 +163,6 @@ interface PdfDocumentProxy {
   destroy?: () => Promise<void>;
 }
 
-const getSettings = callable<[], Settings>("get_settings");
 const saveSettings = callable<[settings: Partial<Settings>], Settings>("save_settings");
 const listPdfs = callable<[], PdfEntry[]>("list_pdfs");
 const getPdfAccess = callable<[pdfId: string], PdfAccess>("get_pdf_access");
@@ -171,16 +180,11 @@ const logFrontendEvent = callable<
   [level: string, message: string, context?: Record<string, unknown>],
   boolean
 >("log_frontend_event");
-const getLogInfo = callable<
-  [],
-  { logFile: string; logDir: string; settingsFile: string; stateFile: string }
->("get_log_info");
-const getLibraryDiagnostics = callable<[], LibraryDiagnostics>(
-  "get_library_diagnostics"
-);
-const getDebugInfo = callable<[], DebugInfo>("get_debug_info");
 const getPluginStatus = callable<[], PluginStatus>("get_plugin_status");
+const getSettingsStatus = callable<[], SettingsStatus>("get_settings_status");
+const getFolderProbe = callable<[], FolderProbe>("get_folder_probe");
 
+const FRONTEND_BUILD = "0.1.13";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
 const MAX_CANVAS_PIXELS = 4_000_000;
@@ -402,9 +406,10 @@ function Content() {
   const [errorMessage, setErrorMessage] = useState("");
   const [renderMessage, setRenderMessage] = useState("");
   const [logPath, setLogPath] = useState("");
-  const [diagnostics, setDiagnostics] = useState<LibraryDiagnostics | null>(null);
-  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [pluginStatus, setPluginStatus] = useState<PluginStatus | null>(null);
+  const [settingsStatus, setSettingsStatus] = useState<SettingsStatus | null>(null);
+  const [folderProbe, setFolderProbe] = useState<FolderProbe | null>(null);
+  const [frontendStatus, setFrontendStatus] = useState<FrontendStatus | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -421,30 +426,65 @@ function Content() {
       console.error("[PDF Viewer]", composed, context);
       setErrorMessage(composed);
       toaster.toast({ title: "PDF Viewer", body: message });
-      await logFrontendEvent("error", message, { ...context, error: detail }).catch(
-        () => undefined
-      );
+      await withTimeout(
+        logFrontendEvent("error", message, { ...context, error: detail }),
+        1_000,
+        "Frontend error logging timed out"
+      ).catch(() => undefined);
     },
     []
   );
+
+  const checkFrontend = useCallback(() => {
+    setFrontendStatus({ ok: true, timestamp: new Date().toISOString() });
+    setBusyMessage("");
+    setErrorMessage("");
+  }, []);
 
   const checkFolder = useCallback(async () => {
     setBusyMessage("Checking PDF folder...");
     setErrorMessage("");
 
     try {
-      const [loadedSettings, loadedLogInfo, loadedDebugInfo] = await Promise.all([
-        getSettings(),
-        getLogInfo(),
-        withTimeout(getDebugInfo(), 3_000, "Debug snapshot took longer than 3 seconds")
-      ]);
-      setSettings(loadedSettings);
-      setLogPath(loadedLogInfo.logFile || loadedLogInfo.logDir);
-      setDebugInfo(loadedDebugInfo);
+      const loadedFolderProbe = await withTimeout(
+        getFolderProbe(),
+        3_000,
+        "Folder probe took longer than 3 seconds"
+      );
+      setFolderProbe(loadedFolderProbe);
       setBusyMessage("");
     } catch (error) {
       setBusyMessage("");
       await reportError("Unable to check the PDF folder", error);
+    }
+  }, [reportError]);
+
+  const checkSettings = useCallback(async () => {
+    setBusyMessage("Checking PDF Viewer settings...");
+    setErrorMessage("");
+
+    try {
+      const loadedSettingsStatus = await withTimeout(
+        getSettingsStatus(),
+        3_000,
+        "Settings check took longer than 3 seconds"
+      );
+      setSettingsStatus(loadedSettingsStatus);
+      setSettings((current) => ({
+        ...current,
+        pdfFolder: loadedSettingsStatus.pdfFolder || current.pdfFolder
+      }));
+      setLogPath(loadedSettingsStatus.logDir);
+      setBusyMessage("");
+
+      if (!loadedSettingsStatus.ok) {
+        setErrorMessage(
+          `Settings check failed: ${loadedSettingsStatus.error || "Unknown settings error"}`
+        );
+      }
+    } catch (error) {
+      setBusyMessage("");
+      await reportError("Unable to check PDF Viewer settings", error);
     }
   }, [reportError]);
 
@@ -453,13 +493,11 @@ function Content() {
     setErrorMessage("");
 
     try {
-      const [loadedSettings, loadedLogInfo, loadedStatus] = await Promise.all([
-        getSettings(),
-        getLogInfo(),
-        withTimeout(getPluginStatus(), 3_000, "Plugin status took longer than 3 seconds")
-      ]);
-      setSettings(loadedSettings);
-      setLogPath(loadedLogInfo.logFile || loadedLogInfo.logDir);
+      const loadedStatus = await withTimeout(
+        getPluginStatus(),
+        3_000,
+        "Plugin status took longer than 3 seconds"
+      );
       setPluginStatus(loadedStatus);
       setBusyMessage("");
     } catch (error) {
@@ -478,22 +516,7 @@ function Content() {
         8_000,
         "Library scan took longer than 8 seconds"
       );
-      const [loadedSettings, loadedLogInfo] = await Promise.all([
-        getSettings(),
-        getLogInfo()
-      ]);
-      const loadedDiagnostics =
-        loadedPdfs.length === 0
-          ? await withTimeout(
-              getLibraryDiagnostics(),
-              3_000,
-              "Library diagnostics took longer than 3 seconds"
-            ).catch(() => null)
-          : null;
-      setSettings(loadedSettings);
       setPdfs(loadedPdfs);
-      setLogPath(loadedLogInfo.logFile || loadedLogInfo.logDir);
-      setDiagnostics(loadedDiagnostics);
       setBusyMessage("");
 
       if (selectedPdf && !loadedPdfs.some((pdf) => pdf.id === selectedPdf.id)) {
@@ -501,12 +524,6 @@ function Content() {
       }
     } catch (error) {
       setBusyMessage("");
-      const info = await withTimeout(
-        getDebugInfo(),
-        3_000,
-        "Debug snapshot took longer than 3 seconds"
-      ).catch(() => null);
-      setDebugInfo(info);
       await reportError("Unable to load the PDF folder", error);
     }
   }, [reportError, selectedPdf]);
@@ -714,19 +731,15 @@ function Content() {
   );
 
   const selectedPdfId = selectedPdf?.id ?? "";
+  const currentFolder = settingsStatus?.pdfFolder || settings.pdfFolder;
   const currentPdfDescription = selectedPdf
     ? `${formatBytes(selectedPdf.sizeBytes)} • modified ${formatDate(selectedPdf.modifiedTime)}`
-    : settings.pdfFolder;
+    : currentFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
   const visibleFiles = pdfs.slice(0, 150);
-  const candidateSummary = diagnostics?.candidates
-    .filter((candidate) => candidate.exists)
-    .slice(0, 4)
-    .map((candidate) => `${candidate.folder} (${candidate.supportedCount})`);
-  const debugEntries = debugInfo?.probe.entries.slice(0, 8) ?? [];
-  const visibleDebugEntries = debugEntries.slice(0, 4);
-  const displayedVersion = debugInfo?.version || pluginStatus?.version || "unknown";
-  const displayedLastScan = debugInfo?.lastScan || pluginStatus?.lastScan;
+  const folderProbeEntries = folderProbe?.probe.entries.slice(0, 4) ?? [];
+  const backendVersion =
+    pluginStatus?.version || settingsStatus?.version || folderProbe?.version || "unknown";
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -804,61 +817,51 @@ function Content() {
           </PanelSectionRow>
         ) : null}
         <PanelSectionRow>
-          <div style={styles.smallText}>{settings.pdfFolder}</div>
+          <div style={styles.smallText}>{currentFolder}</div>
         </PanelSectionRow>
-        {debugInfo ? (
-          <PanelSectionRow>
-            <div style={styles.smallText}>
-              <div>Build: {displayedVersion}</div>
-              <div>
-                Probe: {debugInfo.probe.status}, exists {String(debugInfo.probe.exists)}, dir{" "}
-                {String(debugInfo.probe.isDir)}
-              </div>
-              <div>
-                Last scan: {debugInfo.lastScan.status}, {debugInfo.lastScan.elapsedMs}ms,
-                {` ${debugInfo.lastScan.count}`} files
-              </div>
-              {debugInfo.lastScan.error ? <div>{debugInfo.lastScan.error}</div> : null}
-              {visibleDebugEntries.length > 0 ? <div>First entries:</div> : null}
-              {visibleDebugEntries.map((entry) => (
-                <div key={`${entry.name}-${entry.suffix || ""}`}>
-                  {entry.name} · {entry.isFile ? "file" : entry.isDir ? "folder" : "other"} ·{" "}
-                  {entry.kind || entry.suffix || "unsupported"}
-                </div>
-              ))}
-            </div>
-          </PanelSectionRow>
-        ) : pluginStatus ? (
-          <PanelSectionRow>
-            <div style={styles.smallText}>
-              <div>Build: {displayedVersion}</div>
-              {displayedLastScan ? (
-                <div>
-                  Last scan: {displayedLastScan.status}, {displayedLastScan.elapsedMs}ms,
-                  {` ${displayedLastScan.count}`} files
-                </div>
-              ) : null}
-            </div>
-          </PanelSectionRow>
-        ) : null}
-        {pdfs.length === 0 && diagnostics ? (
-          <PanelSectionRow>
-            <div style={styles.smallText}>
-              <div>Supported: {diagnostics.supportedExtensions.join(", ")}</div>
-              {candidateSummary && candidateSummary.length > 0 ? (
-                <>
-                  <div>Checked folders:</div>
-                  {candidateSummary.map((candidate) => (
-                    <div key={candidate}>{candidate}</div>
-                  ))}
-                </>
-              ) : null}
-            </div>
-          </PanelSectionRow>
-        ) : null}
         <PanelSectionRow>
-          <ButtonItem layout="inline" onClick={() => void refreshLibrary()}>
-            <FaSyncAlt /> Refresh library
+          <div style={styles.smallText}>
+            <div>Frontend build: {FRONTEND_BUILD}</div>
+            <div>Backend build: {backendVersion}</div>
+            {frontendStatus ? <div>Frontend check: ok at {frontendStatus.timestamp}</div> : null}
+            {pluginStatus ? <div>Backend RPC: ok at {pluginStatus.timestamp}</div> : null}
+            {settingsStatus ? (
+              <div>
+                Settings: {settingsStatus.ok ? "ok" : "error"} ·{" "}
+                {settingsStatus.settingsFile}
+              </div>
+            ) : null}
+            {folderProbe ? (
+              <>
+                <div>
+                  Folder probe: {folderProbe.probe.status}, exists{" "}
+                  {String(folderProbe.probe.exists)}, dir {String(folderProbe.probe.isDir)}
+                </div>
+                {folderProbe.probe.error ? <div>{folderProbe.probe.error}</div> : null}
+                {folderProbeEntries.length > 0 ? <div>First entries:</div> : null}
+                {folderProbeEntries.map((entry) => (
+                  <div key={`${entry.name}-${entry.suffix || ""}`}>
+                    {entry.name} · {entry.isFile ? "file" : entry.isDir ? "folder" : "other"} ·{" "}
+                    {entry.kind || entry.suffix || "unsupported"}
+                  </div>
+                ))}
+              </>
+            ) : null}
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="inline" onClick={checkFrontend}>
+            <FaSyncAlt /> Check frontend only
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="inline" onClick={() => void loadPluginStatus()}>
+            <FaSyncAlt /> Check backend only
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="inline" onClick={() => void checkSettings()}>
+            <FaSyncAlt /> Check settings only
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -867,8 +870,8 @@ function Content() {
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="inline" onClick={() => void loadPluginStatus()}>
-            <FaSyncAlt /> Check backend only
+          <ButtonItem layout="inline" onClick={() => void refreshLibrary()}>
+            <FaSyncAlt /> Refresh library
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>

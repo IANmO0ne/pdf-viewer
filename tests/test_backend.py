@@ -164,12 +164,55 @@ def test_plugin_status_has_version_without_filesystem_probe(plugin_module):
     async def exercise():
         await plugin._main()
         status = await plugin.get_plugin_status()
+        default_folder_exists = Path(module.DEFAULT_PDF_FOLDER).exists()
         await plugin._unload()
-        return status
+        return status, default_folder_exists
 
-    status = run(exercise())
+    status, default_folder_exists = run(exercise())
     assert status["version"] == module.PLUGIN_VERSION
-    assert status["lastScan"]["status"] == "not_started"
+    assert "lastScan" not in status
+    assert default_folder_exists is False
+
+
+def test_settings_status_loads_settings_without_creating_pdf_folder(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+
+    async def exercise():
+        await plugin._main()
+        status = await plugin.get_settings_status()
+        default_folder_exists = Path(module.DEFAULT_PDF_FOLDER).exists()
+        await plugin._unload()
+        return status, default_folder_exists
+
+    status, default_folder_exists = run(exercise())
+    assert status["ok"] is True
+    assert status["version"] == module.PLUGIN_VERSION
+    assert status["settingsExists"] is True
+    assert Path(status["settingsFile"]).exists()
+    assert default_folder_exists is False
+
+
+def test_folder_probe_reads_default_folder_without_settings_load(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+    folder = Path(module.DEFAULT_PDF_FOLDER)
+    folder.mkdir(parents=True)
+    (folder / "guide.pdf").write_bytes(b"%PDF-1.7\n")
+    (folder / "cover.png").write_bytes(b"not supported")
+
+    async def exercise():
+        await plugin._main()
+        probe = await plugin.get_folder_probe()
+        await plugin._unload()
+        return probe
+
+    probe = run(exercise())
+    assert probe["version"] == module.PLUGIN_VERSION
+    assert probe["folder"] == str(folder.absolute())
+    assert probe["probe"]["exists"] is True
+    assert probe["probe"]["isDir"] is True
+    assert any(entry["name"] == "guide.pdf" for entry in probe["probe"]["entries"])
 
 
 def test_text_content_loads_for_text_files(plugin_module):

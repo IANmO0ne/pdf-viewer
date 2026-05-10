@@ -22,7 +22,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
-PLUGIN_VERSION = "0.1.12"
+PLUGIN_VERSION = "0.1.13"
 COMMON_LIBRARY_FOLDER_NAMES = (
     "PDF Seamdeck",
     "PDF Steamdeck",
@@ -257,9 +257,83 @@ class Plugin:
         return {
             "version": PLUGIN_VERSION,
             "timestamp": utc_now(),
-            "activeFolder": self._settings.get("pdfFolder", DEFAULT_PDF_FOLDER),
-            "lastScan": copy.deepcopy(self._last_scan),
         }
+
+    async def get_settings_status(self) -> dict[str, Any]:
+        async with self._get_lock():
+            try:
+                self._ensure_plugin_dirs()
+                settings_existed = self.settings_path.exists()
+                loaded_settings = self._sanitize_settings(
+                    self._read_json(self.settings_path, self._settings)
+                )
+                if not settings_existed:
+                    self._write_json(self.settings_path, loaded_settings)
+
+                self._settings = loaded_settings
+                return {
+                    "version": PLUGIN_VERSION,
+                    "timestamp": utc_now(),
+                    "ok": True,
+                    "settingsFile": str(self.settings_path),
+                    "settingsExists": self.settings_path.exists(),
+                    "stateFile": str(self.state_path),
+                    "logDir": str(self.log_dir),
+                    "pdfFolder": loaded_settings["pdfFolder"],
+                    "error": "",
+                }
+            except Exception as error:
+                self._log(
+                    "error",
+                    "Settings status check failed",
+                    {"error": str(error), "traceback": traceback.format_exc(limit=5)},
+                )
+                return {
+                    "version": PLUGIN_VERSION,
+                    "timestamp": utc_now(),
+                    "ok": False,
+                    "settingsFile": str(self.settings_path),
+                    "settingsExists": False,
+                    "stateFile": str(self.state_path),
+                    "logDir": str(self.log_dir),
+                    "pdfFolder": self._settings.get("pdfFolder", DEFAULT_PDF_FOLDER),
+                    "error": str(error),
+                }
+
+    async def get_folder_probe(self) -> dict[str, Any]:
+        folder = Path(DEFAULT_PDF_FOLDER).expanduser().absolute()
+        try:
+            probe = self._probe_folder(folder)
+            return {
+                "version": PLUGIN_VERSION,
+                "timestamp": utc_now(),
+                "folder": str(folder),
+                "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
+                "probe": probe,
+            }
+        except Exception as error:
+            self._log(
+                "error",
+                "Folder probe failed",
+                {
+                    "folder": str(folder),
+                    "error": str(error),
+                    "traceback": traceback.format_exc(limit=5),
+                },
+            )
+            return {
+                "version": PLUGIN_VERSION,
+                "timestamp": utc_now(),
+                "folder": str(folder),
+                "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
+                "probe": {
+                    "status": "error",
+                    "exists": False,
+                    "isDir": False,
+                    "error": str(error),
+                    "entries": [],
+                },
+            }
 
     async def get_library_diagnostics(self) -> dict[str, Any]:
         self._ensure_storage_loaded()
