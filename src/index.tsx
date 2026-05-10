@@ -139,13 +139,14 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.18";
+const FRONTEND_BUILD = "0.1.19";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
 const MAX_CANVAS_PIXELS = 4_000_000;
 const MAX_FULL_PDF_FALLBACK_BYTES = 128 * 1024 * 1024;
+const MAX_STRUCTURAL_REPAIR_FALLBACK_BYTES = 512 * 1024 * 1024;
 const DEFAULT_SETTINGS: Settings = {
   pdfFolder: "/home/deck/Documents/PDF Seamdeck",
   viewMode: "single",
@@ -288,6 +289,17 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+function isStructuralPdfError(error: unknown): boolean {
+  const detail = describeError(error).toLowerCase();
+  return (
+    detail.includes("invalid root reference") ||
+    detail.includes("invalid pdf structure") ||
+    detail.includes("xref") ||
+    detail.includes("trailer") ||
+    detail.includes("catalog")
+  );
+}
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timeoutId: number | undefined;
   const guardedPromise = promise.finally(() => {
@@ -377,15 +389,22 @@ async function loadPdfDocument(
   } catch (error) {
     await loadingTask.destroy?.().catch(() => undefined);
 
-    if (access.sizeBytes > MAX_FULL_PDF_FALLBACK_BYTES) {
+    const allowLargeStructuralRetry =
+      isStructuralPdfError(error) &&
+      access.sizeBytes <= MAX_STRUCTURAL_REPAIR_FALLBACK_BYTES;
+    if (access.sizeBytes > MAX_FULL_PDF_FALLBACK_BYTES && !allowLargeStructuralRetry) {
       throw error;
     }
 
-    setRenderMessage("Retrying with full-file loading...");
+    setRenderMessage(
+      allowLargeStructuralRetry
+        ? "Repair loading large PDF. This can take a minute..."
+        : "Retrying with full-file loading..."
+    );
     const response = await withTimeout(
       fetch(access.url, { cache: "no-store", credentials: "omit" }),
-      20_000,
-      "Full PDF fallback request took longer than 20 seconds"
+      90_000,
+      "Full PDF fallback request took longer than 90 seconds"
     );
     if (!response.ok) {
       throw new Error(`Full PDF fallback failed with HTTP ${response.status}`);
@@ -394,8 +413,10 @@ async function loadPdfDocument(
     const bytes = new Uint8Array(
       await withTimeout(
         response.arrayBuffer(),
-        30_000,
-        "Full PDF fallback download took longer than 30 seconds"
+        allowLargeStructuralRetry ? 180_000 : 60_000,
+        allowLargeStructuralRetry
+          ? "Large PDF repair download took longer than 180 seconds"
+          : "Full PDF fallback download took longer than 60 seconds"
       )
     );
     const fullFileTask = createPdfLoadingTask(access, useCompatibilityRenderer, bytes);
