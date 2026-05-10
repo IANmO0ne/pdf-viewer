@@ -87,7 +87,7 @@ def test_default_folder_is_created_and_supported_listing_is_fast_non_recursive(p
     assert entries[0]["sizeBytes"] > 0
 
 
-def test_diagnostics_count_common_folder_with_files(plugin_module):
+def test_diagnostics_only_reports_default_folder(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
@@ -106,33 +106,23 @@ def test_diagnostics_count_common_folder_with_files(plugin_module):
     settings, diagnostics = run(exercise())
     assert Path(settings["pdfFolder"]).name == "PDF Seamdeck"
     assert diagnostics["activeFolder"] == settings["pdfFolder"]
-    assert any(
-        Path(candidate["folder"]).name == "PDF Steamdeck" and candidate["supportedCount"] == 1
-        for candidate in diagnostics["candidates"]
-    )
+    assert [Path(candidate["folder"]).name for candidate in diagnostics["candidates"]] == [
+        "PDF Seamdeck"
+    ]
 
 
-def test_diagnostics_count_documents_child_folder_with_files(plugin_module):
+def test_settings_always_use_default_pdf_folder(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
     async def exercise():
-        default_folder = Path(module.DEFAULT_PDF_FOLDER)
-        arbitrary_folder = default_folder.parent / "Guides I Copied"
-        arbitrary_folder.mkdir(parents=True)
-        (arbitrary_folder / "walkthrough.txt").write_text("Use the key.", encoding="utf-8")
-
         await plugin._main()
-        diagnostics = await plugin.get_library_diagnostics()
+        settings = await plugin.save_settings({"pdfFolder": "/tmp/other-folder"})
         await plugin._unload()
-        return diagnostics
+        return settings
 
-    diagnostics = run(exercise())
-    assert any(
-        Path(candidate["folder"]).name == "Guides I Copied"
-        and candidate["supportedCount"] == 1
-        for candidate in diagnostics["candidates"]
-    )
+    settings = run(exercise())
+    assert settings["pdfFolder"] == module.DEFAULT_PDF_FOLDER
 
 
 def test_debug_info_reports_last_scan_and_folder_probe(plugin_module):
@@ -172,6 +162,37 @@ def test_plugin_status_has_version_without_filesystem_probe(plugin_module):
     assert status["version"] == module.PLUGIN_VERSION
     assert "lastScan" not in status
     assert default_folder_exists is False
+
+
+def test_backend_initializes_from_environment_when_decky_constants_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    logger = FakeLogger()
+    fake_decky = types.SimpleNamespace(logger=logger)
+
+    monkeypatch.setitem(sys.modules, "decky", fake_decky)
+    monkeypatch.setenv("DECKY_PLUGIN_SETTINGS_DIR", str(tmp_path / "settings-from-env"))
+    monkeypatch.setenv("DECKY_PLUGIN_RUNTIME_DIR", str(tmp_path / "runtime-from-env"))
+    monkeypatch.setenv("DECKY_PLUGIN_LOG_DIR", str(tmp_path / "logs-from-env"))
+    monkeypatch.setenv("PDF_VIEWER_DEFAULT_FOLDER", str(tmp_path / "PDF Seamdeck"))
+    sys.modules.pop("main", None)
+
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    module = importlib.import_module("main")
+    plugin = module.Plugin()
+
+    async def exercise():
+        await plugin._main()
+        status = await plugin.get_plugin_status()
+        await plugin._unload()
+        return status
+
+    status = run(exercise())
+    assert status["version"] == module.PLUGIN_VERSION
+    assert plugin.settings_dir == tmp_path / "settings-from-env"
 
 
 def test_settings_status_loads_settings_without_creating_pdf_folder(plugin_module):

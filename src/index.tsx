@@ -8,7 +8,7 @@ import {
   SliderField,
   staticClasses
 } from "@decky/ui";
-import { callable, definePlugin, toaster } from "@decky/api";
+import { call, definePlugin, toaster } from "@decky/api";
 import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -107,26 +107,32 @@ interface PdfDocumentProxy {
   destroy?: () => Promise<void>;
 }
 
-const saveSettings = callable<[settings: Partial<Settings>], Settings>("save_settings");
-const listPdfs = callable<[], PdfEntry[]>("list_pdfs");
-const getPdfAccess = callable<[pdfId: string], PdfAccess>("get_pdf_access");
-const getTextContent = callable<[fileId: string], TextContent>("get_text_content");
-const getPdfState = callable<[pdfId: string], PdfState>("get_pdf_state");
-const savePdfPosition = callable<
-  [pdfId: string, page: number, zoom: number],
-  PdfState
->("save_pdf_position");
-const toggleBookmark = callable<
-  [pdfId: string, page: number],
-  BookmarkToggleResult
->("toggle_bookmark");
-const logFrontendEvent = callable<
-  [level: string, message: string, context?: Record<string, unknown>],
-  boolean
->("log_frontend_event");
-const getPluginStatus = callable<[], PluginStatus>("get_plugin_status");
+const getPluginStatus = () => call<[], PluginStatus>("get_plugin_status");
+const saveSettings = (settings: Partial<Settings>) =>
+  call<[Partial<Settings>], Settings>("save_settings", settings);
+const listPdfs = () => call<[], PdfEntry[]>("list_pdfs");
+const getPdfAccess = (pdfId: string) =>
+  call<[string], PdfAccess>("get_pdf_access", pdfId);
+const getTextContent = (fileId: string) =>
+  call<[string], TextContent>("get_text_content", fileId);
+const getPdfState = (pdfId: string) => call<[string], PdfState>("get_pdf_state", pdfId);
+const savePdfPosition = (pdfId: string, page: number, zoom: number) =>
+  call<[string, number, number], PdfState>("save_pdf_position", pdfId, page, zoom);
+const toggleBookmark = (pdfId: string, page: number) =>
+  call<[string, number], BookmarkToggleResult>("toggle_bookmark", pdfId, page);
+const logFrontendEvent = (
+  level: string,
+  message: string,
+  context?: Record<string, unknown>
+) =>
+  call<[string, string, Record<string, unknown> | undefined], boolean>(
+    "log_frontend_event",
+    level,
+    message,
+    context
+  );
 
-const FRONTEND_BUILD = "0.1.14";
+const FRONTEND_BUILD = "0.1.15";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;

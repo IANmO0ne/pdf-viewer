@@ -22,16 +22,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
-PLUGIN_VERSION = "0.1.14"
-COMMON_LIBRARY_FOLDER_NAMES = (
-    "PDF Seamdeck",
-    "PDF Steamdeck",
-    "PDF Steam Deck",
-    "PDF Steam deck",
-    "PDF Viewer",
-    "PDF Guides",
-    "Strategy Guides",
-)
+PLUGIN_VERSION = "0.1.15"
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
 MIN_ZOOM = 0.5
@@ -47,7 +38,6 @@ TEXT_SIZE_LIMIT_BYTES = 2 * 1024 * 1024
 MAX_LIBRARY_FILES = 500
 MAX_SCAN_SECONDS = 2.0
 QUICK_SCAN_FILES = 25
-AUTO_SELECT_SECONDS = 1.0
 
 
 def utc_now() -> str:
@@ -71,11 +61,26 @@ def default_pdf_state() -> dict[str, Any]:
     }
 
 
+def decky_path(name: str, fallback: str) -> Path:
+    value = os.environ.get(name) or getattr(decky, name, "") or fallback
+    return Path(value)
+
+
 class Plugin:
     def __init__(self) -> None:
-        self.settings_dir = Path(decky.DECKY_PLUGIN_SETTINGS_DIR)
-        self.runtime_dir = Path(decky.DECKY_PLUGIN_RUNTIME_DIR)
-        self.log_dir = Path(decky.DECKY_PLUGIN_LOG_DIR)
+        home = Path(os.environ.get("HOME", "/home/deck"))
+        self.settings_dir = decky_path(
+            "DECKY_PLUGIN_SETTINGS_DIR",
+            str(home / "homebrew" / "settings" / "decky-pdf-viewer"),
+        )
+        self.runtime_dir = decky_path(
+            "DECKY_PLUGIN_RUNTIME_DIR",
+            str(home / "homebrew" / "data" / "decky-pdf-viewer"),
+        )
+        self.log_dir = decky_path(
+            "DECKY_PLUGIN_LOG_DIR",
+            str(home / "homebrew" / "logs" / "decky-pdf-viewer"),
+        )
         self.settings_path = self.settings_dir / SETTINGS_FILE
         self.state_path = self.settings_dir / STATE_FILE
 
@@ -247,7 +252,8 @@ class Plugin:
 
     async def get_log_info(self) -> dict[str, str]:
         return {
-            "logFile": getattr(decky, "DECKY_PLUGIN_LOG", ""),
+            "logFile": os.environ.get("DECKY_PLUGIN_LOG")
+            or getattr(decky, "DECKY_PLUGIN_LOG", ""),
             "logDir": str(self.log_dir),
             "settingsFile": str(self.settings_path),
             "stateFile": str(self.state_path),
@@ -341,25 +347,21 @@ class Plugin:
 
     def _get_library_diagnostics_sync(self) -> dict[str, Any]:
         active_folder = Path(self._settings["pdfFolder"]).expanduser()
-        candidates = []
-        for folder in self._candidate_library_folders():
-            candidates.append(
-                {
-                    "folder": str(folder),
-                    "exists": folder.exists(),
-                    "supportedCount": self._count_supported_files(
-                        folder,
-                        file_limit=QUICK_SCAN_FILES,
-                        seconds=1.0,
-                    ),
-                }
-            )
-
         return {
             "activeFolder": str(active_folder),
             "activeExists": active_folder.exists(),
             "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
-            "candidates": candidates,
+            "candidates": [
+                {
+                    "folder": str(active_folder),
+                    "exists": active_folder.exists(),
+                    "supportedCount": self._count_supported_files(
+                        active_folder,
+                        file_limit=QUICK_SCAN_FILES,
+                        seconds=1.0,
+                    ),
+                }
+            ],
         }
 
     async def get_debug_info(self) -> dict[str, Any]:
@@ -444,9 +446,6 @@ class Plugin:
 
     def _sanitize_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         sanitized = default_settings()
-        folder = settings.get("pdfFolder")
-        if isinstance(folder, str) and folder.strip():
-            sanitized["pdfFolder"] = folder.strip()
 
         sanitized["viewMode"] = "single"
         sanitized["fitMode"] = "width"
@@ -506,40 +505,6 @@ class Plugin:
             value = 1.0
         return round(min(MAX_ZOOM, max(MIN_ZOOM, value)), 2)
 
-    def _candidate_library_folders(self) -> list[Path]:
-        configured = Path(self._settings.get("pdfFolder") or DEFAULT_PDF_FOLDER).expanduser()
-        default = Path(DEFAULT_PDF_FOLDER).expanduser()
-        candidates = [configured, default]
-        documents_folder = default.parent
-
-        for name in COMMON_LIBRARY_FOLDER_NAMES:
-            candidates.append(documents_folder / name)
-
-        try:
-            if documents_folder.exists() and documents_folder.is_dir():
-                for child in documents_folder.iterdir():
-                    try:
-                        if child.is_dir() and not child.is_symlink():
-                            candidates.append(child)
-                    except OSError:
-                        continue
-        except OSError as error:
-            self._log(
-                "warning",
-                "Unable to inspect Documents folder for library candidates",
-                {"folder": str(documents_folder), "error": str(error)},
-            )
-
-        unique: list[Path] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(candidate)
-        return unique
-
     def _count_supported_files(
         self,
         folder: Path,
@@ -560,63 +525,6 @@ class Plugin:
         ):
             count += 1
         return count
-
-    def _auto_select_library_folder(self) -> bool:
-        current_folder = Path(self._settings["pdfFolder"]).expanduser()
-        current_count = self._count_supported_files(
-            current_folder,
-            file_limit=1,
-            seconds=0.5,
-        )
-        if current_count > 0:
-            return False
-
-        best_folder: Path | None = None
-        best_count = 0
-        deadline = time.monotonic() + AUTO_SELECT_SECONDS
-        for candidate in self._candidate_library_folders():
-            if time.monotonic() >= deadline:
-                self._log(
-                    "warning",
-                    "Auto-select stopped after time limit",
-                    {"seconds": AUTO_SELECT_SECONDS},
-                )
-                break
-            count = self._count_supported_files(
-                candidate,
-                file_limit=1,
-                seconds=0.2,
-            )
-            if count > best_count or (
-                count == best_count
-                and best_folder is not None
-                and len(candidate.parts) > len(best_folder.parts)
-            ):
-                best_folder = candidate
-                best_count = count
-
-        if best_folder is None or best_count <= 0:
-            return False
-
-        try:
-            if current_folder.resolve(strict=False) == best_folder.resolve(strict=False):
-                return False
-        except OSError:
-            pass
-
-        previous_folder = self._settings["pdfFolder"]
-        self._settings["pdfFolder"] = str(best_folder)
-        self._write_json(self.settings_path, self._settings)
-        self._log(
-            "info",
-            "Auto-selected library folder with supported files",
-            {
-                "previousFolder": previous_folder,
-                "selectedFolder": self._settings["pdfFolder"],
-                "supportedCount": best_count,
-            },
-        )
-        return True
 
     def _iter_supported_files(
         self,
@@ -1124,6 +1032,16 @@ class Plugin:
             "context": context or {},
         }
         line = json.dumps(payload, sort_keys=True)
-        logger = decky.logger
-        log_method = getattr(logger, normalized_level, logger.info)
-        log_method(line)
+        logger = getattr(decky, "logger", None)
+        if logger is not None:
+            log_method = getattr(logger, normalized_level, getattr(logger, "info", None))
+            if log_method is not None:
+                log_method(line)
+                return
+
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            with (self.log_dir / "plugin.log").open("a", encoding="utf-8") as file_handle:
+                file_handle.write(line + "\n")
+        except Exception:
+            pass
