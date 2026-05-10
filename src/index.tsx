@@ -95,14 +95,22 @@ interface PdfRenderTask {
 interface PdfPageProxy {
   getViewport: (options: { scale: number }) => PdfViewport;
   render: (options: {
+    canvas?: HTMLCanvasElement;
     canvasContext: CanvasRenderingContext2D;
     viewport: PdfViewport;
+    annotationMode?: number;
+    background?: string;
   }) => PdfRenderTask;
 }
 
 interface PdfDocumentProxy {
   numPages: number;
   getPage: (pageNumber: number) => Promise<PdfPageProxy>;
+  destroy?: () => Promise<void>;
+}
+
+interface PdfDocumentLoadingTask {
+  promise: Promise<unknown>;
   destroy?: () => Promise<void>;
 }
 
@@ -131,12 +139,13 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.17";
+const FRONTEND_BUILD = "0.1.18";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
 const MAX_CANVAS_PIXELS = 4_000_000;
+const MAX_FULL_PDF_FALLBACK_BYTES = 128 * 1024 * 1024;
 const DEFAULT_SETTINGS: Settings = {
   pdfFolder: "/home/deck/Documents/PDF Seamdeck",
   viewMode: "single",
@@ -318,6 +327,91 @@ function fileKindLabel(kind: LibraryKind): string {
   return "Text";
 }
 
+function createPdfLoadingTask(
+  access: PdfAccess,
+  useCompatibilityRenderer: boolean,
+  data?: Uint8Array
+): PdfDocumentLoadingTask {
+  const sharedOptions = {
+    cMapUrl: PDFJS_CMAP_URL,
+    cMapPacked: true,
+    standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL,
+    disableFontFace: useCompatibilityRenderer,
+    useSystemFonts: !useCompatibilityRenderer,
+    stopAtErrors: false,
+    useWorkerFetch: false
+  };
+
+  if (data) {
+    return pdfjsLib.getDocument({
+      ...sharedOptions,
+      data,
+      disableRange: true,
+      disableStream: true,
+      disableAutoFetch: true
+    }) as PdfDocumentLoadingTask;
+  }
+
+  return pdfjsLib.getDocument({
+    ...sharedOptions,
+    url: access.url,
+    withCredentials: false,
+    rangeChunkSize: 65536,
+    disableStream: true,
+    disableAutoFetch: true
+  }) as PdfDocumentLoadingTask;
+}
+
+async function loadPdfDocument(
+  access: PdfAccess,
+  useCompatibilityRenderer: boolean,
+  setRenderMessage: (message: string) => void
+): Promise<PdfDocumentProxy> {
+  const loadingTask = createPdfLoadingTask(access, useCompatibilityRenderer);
+  try {
+    return (await withTimeout(
+      loadingTask.promise as Promise<PdfDocumentProxy>,
+      20_000,
+      "PDF loading took longer than 20 seconds"
+    )) as PdfDocumentProxy;
+  } catch (error) {
+    await loadingTask.destroy?.().catch(() => undefined);
+
+    if (access.sizeBytes > MAX_FULL_PDF_FALLBACK_BYTES) {
+      throw error;
+    }
+
+    setRenderMessage("Retrying with full-file loading...");
+    const response = await withTimeout(
+      fetch(access.url, { cache: "no-store", credentials: "omit" }),
+      20_000,
+      "Full PDF fallback request took longer than 20 seconds"
+    );
+    if (!response.ok) {
+      throw new Error(`Full PDF fallback failed with HTTP ${response.status}`);
+    }
+
+    const bytes = new Uint8Array(
+      await withTimeout(
+        response.arrayBuffer(),
+        30_000,
+        "Full PDF fallback download took longer than 30 seconds"
+      )
+    );
+    const fullFileTask = createPdfLoadingTask(access, useCompatibilityRenderer, bytes);
+    try {
+      return (await withTimeout(
+        fullFileTask.promise as Promise<PdfDocumentProxy>,
+        20_000,
+        "Full PDF loading took longer than 20 seconds"
+      )) as PdfDocumentProxy;
+    } catch (fallbackError) {
+      await fullFileTask.destroy?.().catch(() => undefined);
+      throw fallbackError;
+    }
+  }
+}
+
 function IconButton(props: {
   icon: ReactNode;
   label: string;
@@ -352,6 +446,7 @@ function Content() {
   const [errorMessage, setErrorMessage] = useState("");
   const [renderMessage, setRenderMessage] = useState("");
   const [pluginStatus, setPluginStatus] = useState<PluginStatus | null>(null);
+  const [useCompatibilityRenderer, setUseCompatibilityRenderer] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -456,29 +551,11 @@ function Content() {
           ),
           getPdfState(selectedPdf.id)
         ]);
-        const loadingTask = pdfjsLib.getDocument({
-          url: access.url,
-          withCredentials: false,
-          rangeChunkSize: 65536,
-          disableAutoFetch: true,
-          disableStream: false,
-          cMapUrl: PDFJS_CMAP_URL,
-          cMapPacked: true,
-          standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL,
-          disableFontFace: false,
-          stopAtErrors: false
-        });
-        let doc: PdfDocumentProxy;
-        try {
-          doc = (await withTimeout(
-            loadingTask.promise as Promise<PdfDocumentProxy>,
-            20_000,
-            "PDF loading took longer than 20 seconds"
-          )) as PdfDocumentProxy;
-        } catch (error) {
-          await loadingTask.destroy?.().catch(() => undefined);
-          throw error;
-        }
+        const doc = await loadPdfDocument(
+          access,
+          useCompatibilityRenderer,
+          setRenderMessage
+        );
 
         if (cancelled) {
           await doc.destroy?.();
@@ -509,7 +586,7 @@ function Content() {
       activeRenderRef.current?.cancel();
       void openedDoc?.destroy?.();
     };
-  }, [reportError, selectedPdf]);
+  }, [reportError, selectedPdf, useCompatibilityRenderer]);
 
   useEffect(() => {
     if (!selectedPdf || !pdfDoc || selectedPdf.kind !== "pdf") {
@@ -575,7 +652,13 @@ function Content() {
         context.fillStyle = "#ffffff";
         context.fillRect(0, 0, viewport.width, viewport.height);
 
-        const renderTask = page.render({ canvasContext: context, viewport });
+        const renderTask = page.render({
+          canvas,
+          canvasContext: context,
+          viewport,
+          annotationMode: 0,
+          background: "#ffffff"
+        });
         activeRenderRef.current = renderTask;
         await renderTask.promise;
 
@@ -583,13 +666,31 @@ function Content() {
           setRenderMessage("");
         }
       } catch (error) {
-        if (!cancelled && !describeError(error).toLowerCase().includes("cancel")) {
-          setRenderMessage("");
-          await reportError("Unable to render this page", error, {
-            pdfId: selectedPdf?.id,
-            page: pageNumber
-          });
+        if (cancelled || describeError(error).toLowerCase().includes("cancel")) {
+          return;
         }
+
+        if (!useCompatibilityRenderer) {
+          setRenderMessage("Retrying with compatibility renderer...");
+          await withTimeout(
+            logFrontendEvent("warning", "Retrying PDF render with compatibility renderer", {
+              pdfId: selectedPdf?.id,
+              page: pageNumber,
+              error: describeError(error)
+            }),
+            1_000,
+            "Frontend render retry logging timed out"
+          ).catch(() => undefined);
+          setUseCompatibilityRenderer(true);
+          return;
+        }
+
+        setRenderMessage("");
+        await reportError("Unable to render this page", error, {
+          pdfId: selectedPdf?.id,
+          page: pageNumber,
+          compatibilityRenderer: useCompatibilityRenderer
+        });
       }
     };
 
@@ -599,7 +700,7 @@ function Content() {
       cancelled = true;
       activeRenderRef.current?.cancel();
     };
-  }, [pageNumber, pdfDoc, reportError, selectedPdf?.id, zoom]);
+  }, [pageNumber, pdfDoc, reportError, selectedPdf?.id, useCompatibilityRenderer, zoom]);
 
   const currentFolder = settings.pdfFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
@@ -609,12 +710,14 @@ function Content() {
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
+    setUseCompatibilityRenderer(false);
     setSelectedPdf(pdf);
     setShowBookmarks(false);
     setShowSettings(false);
   };
 
   const goHome = () => {
+    setUseCompatibilityRenderer(false);
     setSelectedPdf(null);
     setShowBookmarks(false);
     setShowSettings(false);
@@ -783,6 +886,13 @@ function Content() {
                 <span>{selectedPdf.kind === "pdf" ? `${Math.round(zoom * 100)}%` : ""}</span>
               </div>
             </PanelSectionRow>
+            {useCompatibilityRenderer ? (
+              <PanelSectionRow>
+                <div style={styles.smallText}>
+                  Compatibility renderer active for this PDF.
+                </div>
+              </PanelSectionRow>
+            ) : null}
             <PanelSectionRow>
               <ButtonItem
                 layout="inline"
