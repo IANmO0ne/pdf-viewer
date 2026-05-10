@@ -78,64 +78,8 @@ interface TextContent {
   text: string;
 }
 
-interface DebugEntry {
-  name: string;
-  isFile?: boolean;
-  isDir?: boolean;
-  suffix?: string;
-  kind?: LibraryKind | null;
-  error?: string;
-}
-
-interface DebugInfo {
-  version: string;
-  timestamp: string;
-  settingsFolder: string;
-  activeFolder: string;
-  supportedExtensions: string[];
-  lastScan: {
-    status: string;
-    folder: string;
-    count: number;
-    elapsedMs: number;
-    error: string;
-  };
-  probe: {
-    status: string;
-    exists?: boolean;
-    isDir?: boolean;
-    error?: string;
-    entries: DebugEntry[];
-  };
-}
-
 interface PluginStatus {
   version: string;
-  timestamp: string;
-}
-
-interface SettingsStatus {
-  version: string;
-  timestamp: string;
-  ok: boolean;
-  settingsFile: string;
-  settingsExists: boolean;
-  stateFile: string;
-  logDir: string;
-  pdfFolder: string;
-  error: string;
-}
-
-interface FolderProbe {
-  version: string;
-  timestamp: string;
-  folder: string;
-  supportedExtensions: string[];
-  probe: DebugInfo["probe"];
-}
-
-interface FrontendStatus {
-  ok: boolean;
   timestamp: string;
 }
 
@@ -181,10 +125,10 @@ const logFrontendEvent = callable<
   boolean
 >("log_frontend_event");
 const getPluginStatus = callable<[], PluginStatus>("get_plugin_status");
-const getSettingsStatus = callable<[], SettingsStatus>("get_settings_status");
-const getFolderProbe = callable<[], FolderProbe>("get_folder_probe");
 
-const FRONTEND_BUILD = "0.1.13";
+const FRONTEND_BUILD = "0.1.14";
+const BACKEND_LOG_COMMAND =
+  'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
 const MAX_CANVAS_PIXELS = 4_000_000;
@@ -405,11 +349,7 @@ function Content() {
   const [busyMessage, setBusyMessage] = useState("Loading PDF folder...");
   const [errorMessage, setErrorMessage] = useState("");
   const [renderMessage, setRenderMessage] = useState("");
-  const [logPath, setLogPath] = useState("");
   const [pluginStatus, setPluginStatus] = useState<PluginStatus | null>(null);
-  const [settingsStatus, setSettingsStatus] = useState<SettingsStatus | null>(null);
-  const [folderProbe, setFolderProbe] = useState<FolderProbe | null>(null);
-  const [frontendStatus, setFrontendStatus] = useState<FrontendStatus | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -435,77 +375,6 @@ function Content() {
     []
   );
 
-  const checkFrontend = useCallback(() => {
-    setFrontendStatus({ ok: true, timestamp: new Date().toISOString() });
-    setBusyMessage("");
-    setErrorMessage("");
-  }, []);
-
-  const checkFolder = useCallback(async () => {
-    setBusyMessage("Checking PDF folder...");
-    setErrorMessage("");
-
-    try {
-      const loadedFolderProbe = await withTimeout(
-        getFolderProbe(),
-        3_000,
-        "Folder probe took longer than 3 seconds"
-      );
-      setFolderProbe(loadedFolderProbe);
-      setBusyMessage("");
-    } catch (error) {
-      setBusyMessage("");
-      await reportError("Unable to check the PDF folder", error);
-    }
-  }, [reportError]);
-
-  const checkSettings = useCallback(async () => {
-    setBusyMessage("Checking PDF Viewer settings...");
-    setErrorMessage("");
-
-    try {
-      const loadedSettingsStatus = await withTimeout(
-        getSettingsStatus(),
-        3_000,
-        "Settings check took longer than 3 seconds"
-      );
-      setSettingsStatus(loadedSettingsStatus);
-      setSettings((current) => ({
-        ...current,
-        pdfFolder: loadedSettingsStatus.pdfFolder || current.pdfFolder
-      }));
-      setLogPath(loadedSettingsStatus.logDir);
-      setBusyMessage("");
-
-      if (!loadedSettingsStatus.ok) {
-        setErrorMessage(
-          `Settings check failed: ${loadedSettingsStatus.error || "Unknown settings error"}`
-        );
-      }
-    } catch (error) {
-      setBusyMessage("");
-      await reportError("Unable to check PDF Viewer settings", error);
-    }
-  }, [reportError]);
-
-  const loadPluginStatus = useCallback(async () => {
-    setBusyMessage("Checking PDF Viewer...");
-    setErrorMessage("");
-
-    try {
-      const loadedStatus = await withTimeout(
-        getPluginStatus(),
-        3_000,
-        "Plugin status took longer than 3 seconds"
-      );
-      setPluginStatus(loadedStatus);
-      setBusyMessage("");
-    } catch (error) {
-      setBusyMessage("");
-      await reportError("Unable to load PDF Viewer status", error);
-    }
-  }, [reportError]);
-
   const refreshLibrary = useCallback(async () => {
     setBusyMessage("Loading PDF folder...");
     setErrorMessage("");
@@ -528,9 +397,35 @@ function Content() {
     }
   }, [reportError, selectedPdf]);
 
+  const loadLibrary = useCallback(async () => {
+    setBusyMessage("Connecting to PDF Viewer...");
+    setErrorMessage("");
+
+    try {
+      const loadedStatus = await withTimeout(
+        getPluginStatus(),
+        3_000,
+        "Python backend did not answer within 3 seconds"
+      );
+      setPluginStatus(loadedStatus);
+
+      setBusyMessage("Loading PDF folder...");
+      const loadedPdfs = await withTimeout(
+        listPdfs(),
+        8_000,
+        "Library scan took longer than 8 seconds"
+      );
+      setPdfs(loadedPdfs);
+      setBusyMessage("");
+    } catch (error) {
+      setBusyMessage("");
+      await reportError("PDF Viewer backend is not responding", error);
+    }
+  }, [reportError]);
+
   useEffect(() => {
-    void loadPluginStatus();
-  }, [loadPluginStatus]);
+    void loadLibrary();
+  }, [loadLibrary]);
 
   useEffect(() => {
     if (!selectedPdf) {
@@ -731,15 +626,20 @@ function Content() {
   );
 
   const selectedPdfId = selectedPdf?.id ?? "";
-  const currentFolder = settingsStatus?.pdfFolder || settings.pdfFolder;
+  const currentFolder = settings.pdfFolder;
   const currentPdfDescription = selectedPdf
     ? `${formatBytes(selectedPdf.sizeBytes)} • modified ${formatDate(selectedPdf.modifiedTime)}`
     : currentFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
   const visibleFiles = pdfs.slice(0, 150);
-  const folderProbeEntries = folderProbe?.probe.entries.slice(0, 4) ?? [];
-  const backendVersion =
-    pluginStatus?.version || settingsStatus?.version || folderProbe?.version || "unknown";
+  const backendVersion = pluginStatus?.version || "not connected";
+  const backendIsConnected = Boolean(pluginStatus);
+  const pickerLabel =
+    !backendIsConnected && errorMessage
+      ? "Backend not connected"
+      : pdfOptions.length === 0
+        ? "No supported files found"
+        : "Choose a file";
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -799,7 +699,7 @@ function Content() {
             rgOptions={pdfOptions}
             selectedOption={selectedPdfId}
             disabled={pdfOptions.length === 0}
-            strDefaultLabel={pdfOptions.length === 0 ? "No supported files found" : "Choose a file"}
+            strDefaultLabel={pickerLabel}
             menuLabel="Library"
             onMenuWillOpen={(showMenu) => {
               void refreshLibrary().finally(showMenu);
@@ -823,60 +723,35 @@ function Content() {
           <div style={styles.smallText}>
             <div>Frontend build: {FRONTEND_BUILD}</div>
             <div>Backend build: {backendVersion}</div>
-            {frontendStatus ? <div>Frontend check: ok at {frontendStatus.timestamp}</div> : null}
             {pluginStatus ? <div>Backend RPC: ok at {pluginStatus.timestamp}</div> : null}
-            {settingsStatus ? (
-              <div>
-                Settings: {settingsStatus.ok ? "ok" : "error"} ·{" "}
-                {settingsStatus.settingsFile}
-              </div>
-            ) : null}
-            {folderProbe ? (
-              <>
-                <div>
-                  Folder probe: {folderProbe.probe.status}, exists{" "}
-                  {String(folderProbe.probe.exists)}, dir {String(folderProbe.probe.isDir)}
-                </div>
-                {folderProbe.probe.error ? <div>{folderProbe.probe.error}</div> : null}
-                {folderProbeEntries.length > 0 ? <div>First entries:</div> : null}
-                {folderProbeEntries.map((entry) => (
-                  <div key={`${entry.name}-${entry.suffix || ""}`}>
-                    {entry.name} · {entry.isFile ? "file" : entry.isDir ? "folder" : "other"} ·{" "}
-                    {entry.kind || entry.suffix || "unsupported"}
-                  </div>
-                ))}
-              </>
+            {!backendIsConnected ? (
+              <div>Waiting for Decky to start the Python backend.</div>
             ) : null}
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="inline" onClick={checkFrontend}>
-            <FaSyncAlt /> Check frontend only
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="inline" onClick={() => void loadPluginStatus()}>
-            <FaSyncAlt /> Check backend only
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="inline" onClick={() => void checkSettings()}>
-            <FaSyncAlt /> Check settings only
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="inline" onClick={() => void checkFolder()}>
-            <FaSyncAlt /> Check folder only
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="inline" onClick={() => void refreshLibrary()}>
-            <FaSyncAlt /> Refresh library
+          <ButtonItem layout="inline" onClick={() => void loadLibrary()}>
+            <FaSyncAlt /> Retry loading files
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 
-      {errorMessage ? <div style={styles.error}>{errorMessage}</div> : null}
+      {errorMessage ? (
+        <div style={styles.error}>
+          <div>{errorMessage}</div>
+          {!backendIsConnected ? (
+            <>
+              <div style={{ marginTop: "6px" }}>
+                The frontend is installed, but Decky is not answering Python RPC calls.
+                Run this in Desktop Mode Konsole and send the output:
+              </div>
+              <div style={{ marginTop: "6px", overflowWrap: "anywhere" }}>
+                {BACKEND_LOG_COMMAND}
+              </div>
+            </>
+          ) : null}
+        </div>
+      ) : null}
 
       {!selectedPdf ? (
         <PanelSection>
@@ -1002,11 +877,6 @@ function Content() {
                   to keep large guides responsive in the Decky overlay.
                 </div>
               </PanelSectionRow>
-              {logPath ? (
-                <PanelSectionRow>
-                  <div style={styles.smallText}>Log: {logPath}</div>
-                </PanelSectionRow>
-              ) : null}
             </PanelSection>
           ) : null}
 
