@@ -43,12 +43,10 @@ SUPPORTED_EXTENSIONS = {
     ".md": "text",
 }
 TEXT_SIZE_LIMIT_BYTES = 2 * 1024 * 1024
-MAX_LIBRARY_FILES = 2_000
-MAX_SCAN_DIRS = 250
-MAX_SCAN_SECONDS = 4.0
+MAX_LIBRARY_FILES = 500
+MAX_SCAN_SECONDS = 2.0
 QUICK_SCAN_FILES = 25
-QUICK_SCAN_DIRS = 25
-AUTO_SELECT_SECONDS = 2.0
+AUTO_SELECT_SECONDS = 1.0
 
 
 def utc_now() -> str:
@@ -134,7 +132,11 @@ class Plugin:
             self._log(
                 "debug",
                 "Library folder scanned",
-                {"folder": self._settings["pdfFolder"], "count": len(entries)},
+                {
+                    "folder": self._settings["pdfFolder"],
+                    "count": len(entries),
+                    "recursive": False,
+                },
             )
             return entries
 
@@ -250,7 +252,6 @@ class Plugin:
                         "supportedCount": self._count_supported_files(
                             folder,
                             file_limit=QUICK_SCAN_FILES,
-                            dir_limit=QUICK_SCAN_DIRS,
                             seconds=1.0,
                         ),
                     }
@@ -406,7 +407,6 @@ class Plugin:
         self,
         folder: Path,
         file_limit: int = QUICK_SCAN_FILES,
-        dir_limit: int = QUICK_SCAN_DIRS,
         seconds: float = 1.0,
     ) -> int:
         try:
@@ -419,7 +419,6 @@ class Plugin:
         for _path, _kind in self._iter_supported_files(
             folder,
             file_limit=file_limit,
-            dir_limit=dir_limit,
             seconds=seconds,
         ):
             count += 1
@@ -430,7 +429,6 @@ class Plugin:
         current_count = self._count_supported_files(
             current_folder,
             file_limit=1,
-            dir_limit=QUICK_SCAN_DIRS,
             seconds=0.5,
         )
         if current_count > 0:
@@ -450,7 +448,6 @@ class Plugin:
             count = self._count_supported_files(
                 candidate,
                 file_limit=1,
-                dir_limit=QUICK_SCAN_DIRS,
                 seconds=0.2,
             )
             if count > best_count or (
@@ -488,85 +485,56 @@ class Plugin:
         self,
         folder: Path,
         file_limit: int = MAX_LIBRARY_FILES,
-        dir_limit: int = MAX_SCAN_DIRS,
         seconds: float = MAX_SCAN_SECONDS,
     ):
-        stack = [folder]
-        scanned_dirs = 0
         yielded_files = 0
         deadline = time.monotonic() + seconds
 
-        while stack:
-            if time.monotonic() >= deadline:
-                self._log(
-                    "warning",
-                    "Library scan stopped after time limit",
-                    {"folder": str(folder), "seconds": seconds},
-                )
-                return
-
-            current = stack.pop()
-            scanned_dirs += 1
-            if scanned_dirs > dir_limit:
-                self._log(
-                    "warning",
-                    "Library scan stopped after directory limit",
-                    {"folder": str(folder), "dirLimit": dir_limit},
-                )
-                return
-
-            try:
-                with os.scandir(current) as iterator:
-                    children = list(iterator)
-            except OSError as error:
-                self._log(
-                    "warning",
-                    "Unable to scan library directory",
-                    {"folder": str(current), "error": str(error)},
-                )
-                continue
-
-            for entry in children:
-                if time.monotonic() >= deadline:
-                    self._log(
-                        "warning",
-                        "Library scan stopped after time limit",
-                        {"folder": str(folder), "seconds": seconds},
-                    )
-                    return
-
-                try:
-                    if entry.is_symlink():
-                        continue
-                    entry_path = Path(entry.path)
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append(entry_path)
-                        continue
-                    if not entry.is_file(follow_symlinks=False):
-                        continue
-
-                    kind = self._kind_for_path(entry_path)
-                    if kind is None:
-                        continue
-
-                    yielded_files += 1
-                    if yielded_files > file_limit:
+        try:
+            with os.scandir(folder) as iterator:
+                for entry in iterator:
+                    if time.monotonic() >= deadline:
                         self._log(
                             "warning",
-                            "Library scan stopped after file limit",
-                            {"folder": str(folder), "fileLimit": file_limit},
+                            "Library scan stopped after time limit",
+                            {"folder": str(folder), "seconds": seconds},
                         )
                         return
-                    yield entry_path, kind
-                except OSError as error:
-                    self._log(
-                        "warning",
-                        "Skipping unreadable library entry",
-                        {"entry": entry.path, "error": str(error)},
-                    )
+
+                    try:
+                        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                            continue
+
+                        entry_path = Path(entry.path)
+                        kind = self._kind_for_path(entry_path)
+                        if kind is None:
+                            continue
+
+                        yielded_files += 1
+                        if yielded_files > file_limit:
+                            self._log(
+                                "warning",
+                                "Library scan stopped after file limit",
+                                {"folder": str(folder), "fileLimit": file_limit},
+                            )
+                            return
+                        yield entry_path, kind
+                    except OSError as error:
+                        self._log(
+                            "warning",
+                            "Skipping unreadable library entry",
+                            {"entry": entry.path, "error": str(error)},
+                        )
+        except OSError as error:
+            self._log(
+                "warning",
+                "Unable to scan library directory",
+                {"folder": str(folder), "error": str(error)},
+            )
+            return
 
     def _scan_supported_files(self) -> list[dict[str, Any]]:
-        folder = Path(self._settings["pdfFolder"]).expanduser().resolve()
+        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
         folder.mkdir(parents=True, exist_ok=True)
 
         entries: list[dict[str, Any]] = []
@@ -574,21 +542,18 @@ class Plugin:
 
         for child, kind in self._iter_supported_files(folder):
             try:
-                resolved = child.resolve()
-                resolved.relative_to(folder)
-                if not resolved.is_file():
+                if not child.is_file():
                     continue
 
-                stat = resolved.stat()
-                pdf_id = self._pdf_id(resolved)
-                index[pdf_id] = resolved
-                relative_path = resolved.relative_to(folder).as_posix()
+                stat = child.stat()
+                pdf_id = self._pdf_id(child)
+                index[pdf_id] = child
                 entries.append(
                     {
                         "id": pdf_id,
                         "kind": kind,
-                        "name": resolved.name,
-                        "relativePath": relative_path,
+                        "name": child.name,
+                        "relativePath": child.name,
                         "sizeBytes": stat.st_size,
                         "modifiedTime": datetime.fromtimestamp(
                             stat.st_mtime, tz=timezone.utc
@@ -603,9 +568,6 @@ class Plugin:
                 )
 
         entries.sort(key=lambda entry: entry["relativePath"].casefold())
-        if not entries and self._auto_select_library_folder():
-            return self._scan_supported_files()
-
         self._file_index = index
         return entries
 

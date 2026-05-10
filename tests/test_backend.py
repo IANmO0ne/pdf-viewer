@@ -54,7 +54,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_default_folder_is_created_and_supported_listing_is_recursive(plugin_module):
+def test_default_folder_is_created_and_supported_listing_is_fast_non_recursive(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
@@ -80,16 +80,14 @@ def test_default_folder_is_created_and_supported_listing_is_recursive(plugin_mod
     entries = run(exercise())
     assert [entry["relativePath"] for entry in entries] == [
         "guide.PDF",
-        "nested/book.epub",
-        "nested/nested.pdf",
         "notes.txt",
     ]
-    assert [entry["kind"] for entry in entries] == ["pdf", "epub", "pdf", "text"]
+    assert [entry["kind"] for entry in entries] == ["pdf", "text"]
     assert entries[0]["id"]
     assert entries[0]["sizeBytes"] > 0
 
 
-def test_common_folder_with_files_is_auto_selected(plugin_module):
+def test_diagnostics_count_common_folder_with_files(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
@@ -100,23 +98,21 @@ def test_common_folder_with_files_is_auto_selected(plugin_module):
         (alternate_folder / "guide.pdf").write_bytes(b"%PDF-1.7\n")
 
         await plugin._main()
-        entries = await plugin.list_pdfs()
         settings = await plugin.get_settings()
         diagnostics = await plugin.get_library_diagnostics()
         await plugin._unload()
-        return settings, entries, diagnostics
+        return settings, diagnostics
 
-    settings, entries, diagnostics = run(exercise())
-    assert Path(settings["pdfFolder"]).name == "PDF Steamdeck"
-    assert [entry["relativePath"] for entry in entries] == ["guide.pdf"]
+    settings, diagnostics = run(exercise())
+    assert Path(settings["pdfFolder"]).name == "PDF Seamdeck"
     assert diagnostics["activeFolder"] == settings["pdfFolder"]
     assert any(
-        candidate["folder"] == settings["pdfFolder"] and candidate["supportedCount"] == 1
+        Path(candidate["folder"]).name == "PDF Steamdeck" and candidate["supportedCount"] == 1
         for candidate in diagnostics["candidates"]
     )
 
 
-def test_documents_child_folder_with_files_is_auto_selected(plugin_module):
+def test_diagnostics_count_documents_child_folder_with_files(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
@@ -127,14 +123,16 @@ def test_documents_child_folder_with_files_is_auto_selected(plugin_module):
         (arbitrary_folder / "walkthrough.txt").write_text("Use the key.", encoding="utf-8")
 
         await plugin._main()
-        entries = await plugin.list_pdfs()
-        settings = await plugin.get_settings()
+        diagnostics = await plugin.get_library_diagnostics()
         await plugin._unload()
-        return settings, entries
+        return diagnostics
 
-    settings, entries = run(exercise())
-    assert Path(settings["pdfFolder"]).name == "Guides I Copied"
-    assert [entry["relativePath"] for entry in entries] == ["walkthrough.txt"]
+    diagnostics = run(exercise())
+    assert any(
+        Path(candidate["folder"]).name == "Guides I Copied"
+        and candidate["supportedCount"] == 1
+        for candidate in diagnostics["candidates"]
+    )
 
 
 def test_text_content_loads_for_text_files(plugin_module):

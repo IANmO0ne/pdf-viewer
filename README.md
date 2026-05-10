@@ -6,9 +6,9 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 
 ## V1 Features
 
-- Recursively lists `.pdf`, `.epub`, `.txt`, and `.md` files from `/home/deck/Documents/PDF Seamdeck`
-- Auto-detects common alternate folder names and guide folders under `/home/deck/Documents` when the configured folder is empty
-- Uses bounded folder scans so a large or unreadable directory cannot leave the Decky panel stuck on loading forever
+- Lists `.pdf`, `.epub`, `.txt`, and `.md` files directly from `/home/deck/Documents/PDF Seamdeck`
+- Shows quick diagnostics for common alternate folder names and guide folders under `/home/deck/Documents` when the configured folder is empty
+- Uses bounded, non-recursive folder scans so a large or unreadable directory cannot leave the Decky panel stuck on loading forever
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out, panning, bookmarks, and bookmark navigation
@@ -20,8 +20,8 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 ## Steam Deck Install For Testing
 
 1. Put your guides in `/home/deck/Documents/PDF Seamdeck`.
-   If you already made a similar folder such as `/home/deck/Documents/PDF Steamdeck`, the plugin will auto-select it when it finds supported files there.
-   The empty-library screen shows which folders were checked and how many supported files were found.
+   Files must be directly inside this folder for the current troubleshooting build. Subfolder scanning is temporarily disabled until the Steam Deck scan timeout is resolved.
+   If you already made a similar folder such as `/home/deck/Documents/PDF Steamdeck`, the empty-library screen shows which folders were checked and how many supported files were found.
 2. Build the plugin from this repository:
 
    ```sh
