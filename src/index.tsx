@@ -101,6 +101,7 @@ interface DebugEntry {
 }
 
 interface DebugInfo {
+  version: string;
   timestamp: string;
   settingsFolder: string;
   activeFolder: string;
@@ -418,16 +419,35 @@ function Content() {
     []
   );
 
+  const checkFolder = useCallback(async () => {
+    setBusyMessage("Checking PDF folder...");
+    setErrorMessage("");
+
+    try {
+      const [loadedSettings, loadedLogInfo, loadedDebugInfo] = await Promise.all([
+        getSettings(),
+        getLogInfo(),
+        withTimeout(getDebugInfo(), 3_000, "Debug snapshot took longer than 3 seconds")
+      ]);
+      setSettings(loadedSettings);
+      setLogPath(loadedLogInfo.logFile || loadedLogInfo.logDir);
+      setDebugInfo(loadedDebugInfo);
+      setBusyMessage("");
+    } catch (error) {
+      setBusyMessage("");
+      await reportError("Unable to check the PDF folder", error);
+    }
+  }, [reportError]);
+
   const refreshLibrary = useCallback(async () => {
     setBusyMessage("Loading PDF folder...");
     setErrorMessage("");
-    setDebugInfo(null);
 
     try {
       const loadedPdfs = await withTimeout(
         listPdfs(),
-        15_000,
-        "Library scan took longer than 15 seconds"
+        8_000,
+        "Library scan took longer than 8 seconds"
       );
       const [loadedSettings, loadedLogInfo] = await Promise.all([
         getSettings(),
@@ -463,8 +483,8 @@ function Content() {
   }, [reportError, selectedPdf]);
 
   useEffect(() => {
-    void refreshLibrary();
-  }, []);
+    void checkFolder();
+  }, [checkFolder]);
 
   useEffect(() => {
     if (!selectedPdf) {
@@ -675,6 +695,7 @@ function Content() {
     .slice(0, 4)
     .map((candidate) => `${candidate.folder} (${candidate.supportedCount})`);
   const debugEntries = debugInfo?.probe.entries.slice(0, 8) ?? [];
+  const visibleDebugEntries = debugEntries.slice(0, 4);
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -754,6 +775,29 @@ function Content() {
         <PanelSectionRow>
           <div style={styles.smallText}>{settings.pdfFolder}</div>
         </PanelSectionRow>
+        {debugInfo ? (
+          <PanelSectionRow>
+            <div style={styles.smallText}>
+              <div>Build: {debugInfo.version}</div>
+              <div>
+                Probe: {debugInfo.probe.status}, exists {String(debugInfo.probe.exists)}, dir{" "}
+                {String(debugInfo.probe.isDir)}
+              </div>
+              <div>
+                Last scan: {debugInfo.lastScan.status}, {debugInfo.lastScan.elapsedMs}ms,
+                {` ${debugInfo.lastScan.count}`} files
+              </div>
+              {debugInfo.lastScan.error ? <div>{debugInfo.lastScan.error}</div> : null}
+              {visibleDebugEntries.length > 0 ? <div>First entries:</div> : null}
+              {visibleDebugEntries.map((entry) => (
+                <div key={`${entry.name}-${entry.suffix || ""}`}>
+                  {entry.name} · {entry.isFile ? "file" : entry.isDir ? "folder" : "other"} ·{" "}
+                  {entry.kind || entry.suffix || "unsupported"}
+                </div>
+              ))}
+            </div>
+          </PanelSectionRow>
+        ) : null}
         {pdfs.length === 0 && diagnostics ? (
           <PanelSectionRow>
             <div style={styles.smallText}>
@@ -774,35 +818,14 @@ function Content() {
             <FaSyncAlt /> Refresh library
           </ButtonItem>
         </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="inline" onClick={() => void checkFolder()}>
+            <FaSyncAlt /> Check folder only
+          </ButtonItem>
+        </PanelSectionRow>
       </PanelSection>
 
       {errorMessage ? <div style={styles.error}>{errorMessage}</div> : null}
-      {debugInfo ? (
-        <PanelSection title="Debug">
-          <PanelSectionRow>
-            <div style={styles.smallText}>
-              <div>Active: {debugInfo.activeFolder}</div>
-              <div>
-                Last scan: {debugInfo.lastScan.status}, {debugInfo.lastScan.elapsedMs}ms,
-                {` ${debugInfo.lastScan.count}`} files
-              </div>
-              {debugInfo.lastScan.error ? <div>{debugInfo.lastScan.error}</div> : null}
-              <div>
-                Probe: {debugInfo.probe.status}, exists {String(debugInfo.probe.exists)}, dir{" "}
-                {String(debugInfo.probe.isDir)}
-              </div>
-              {debugInfo.probe.error ? <div>{debugInfo.probe.error}</div> : null}
-              {debugEntries.length > 0 ? <div>First entries:</div> : null}
-              {debugEntries.map((entry) => (
-                <div key={`${entry.name}-${entry.suffix || ""}`}>
-                  {entry.name} · {entry.isFile ? "file" : entry.isDir ? "folder" : "other"} ·{" "}
-                  {entry.kind || entry.suffix || "unsupported"}
-                </div>
-              ))}
-            </div>
-          </PanelSectionRow>
-        </PanelSection>
-      ) : null}
 
       {!selectedPdf ? (
         <PanelSection>

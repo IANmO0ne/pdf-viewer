@@ -150,6 +150,7 @@ def test_debug_info_reports_last_scan_and_folder_probe(plugin_module):
 
     entries, debug_info = run(exercise())
     assert [entry["name"] for entry in entries] == ["walkthrough.txt"]
+    assert debug_info["version"] == module.PLUGIN_VERSION
     assert debug_info["lastScan"]["status"] == "ok"
     assert debug_info["lastScan"]["count"] == 1
     assert debug_info["probe"]["exists"] is True

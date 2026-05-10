@@ -22,6 +22,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
+PLUGIN_VERSION = "0.1.9"
 COMMON_LIBRARY_FOLDER_NAMES = (
     "PDF Seamdeck",
     "PDF Steamdeck",
@@ -301,6 +302,7 @@ class Plugin:
             }
 
         return {
+            "version": PLUGIN_VERSION,
             "timestamp": utc_now(),
             "settingsFolder": str(self.settings_dir),
             "activeFolder": str(folder),
