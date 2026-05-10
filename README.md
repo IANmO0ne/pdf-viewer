@@ -38,6 +38,8 @@ If Decky still shows a `Failed to fetch dynamically imported module` error after
 
 The GitHub release flow is the intended publish path once Steam Deck testing confirms the plugin behaves well in Gaming Mode. Upload `out/decky-pdf-viewer.zip` to a release, then download and install that zip on the Deck.
 
+The test zip intentionally omits source maps and extra docs so Decky's local installer has less work to parse in Gaming Mode.
+
 ### Direct Copy Notes
 
 For early testing, the release zip is safer than copying raw source because it matches Decky's distribution layout. If direct SSH deployment is added later, it should copy the packaged plugin directory from `out/decky-pdf-viewer/` into `/home/deck/homebrew/plugins/decky-pdf-viewer`.

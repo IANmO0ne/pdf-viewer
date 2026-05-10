@@ -29,13 +29,12 @@ await mkdir(stageDir, { recursive: true });
 await copyIntoStage("plugin.json");
 await copyIntoStage("package.json");
 await copyIntoStage("main.py");
-await copyIntoStage("README.md");
-await copyIntoStage("MIGRATION_NOTES.md");
 await copyIntoStage("LICENSE");
-await copyIntoStage("dist");
+await copyIntoStage("dist/index.js");
+await copyIntoStage("dist/pdf.worker.min.js");
 
 const output = createWriteStream(zipPath);
-const archive = archiver("zip", { zlib: { level: 9 } });
+const archive = archiver("zip", { store: true });
 
 const done = new Promise((resolveDone, rejectDone) => {
   output.on("close", resolveDone);
