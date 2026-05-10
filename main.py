@@ -22,7 +22,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
-PLUGIN_VERSION = "0.1.9"
+PLUGIN_VERSION = "0.1.10"
 COMMON_LIBRARY_FOLDER_NAMES = (
     "PDF Seamdeck",
     "PDF Steamdeck",
@@ -136,7 +136,7 @@ class Plugin:
 
     async def list_pdfs(self) -> list[dict[str, Any]]:
         async with self._get_lock():
-            entries = await self._refresh_file_index(timeout=5.0)
+            entries = self._refresh_file_index()
             self._log(
                 "debug",
                 "Library folder scanned",
@@ -153,7 +153,7 @@ class Plugin:
             self._validate_pdf_id(pdf_id)
             path = self._file_index.get(pdf_id)
             if path is None:
-                await self._refresh_file_index(timeout=5.0)
+                self._refresh_file_index()
                 path = self._file_index.get(pdf_id)
             if path is None:
                 self._log("warning", "File access requested for missing file", {"id": pdf_id})
@@ -173,7 +173,7 @@ class Plugin:
             self._validate_pdf_id(file_id)
             path = self._file_index.get(file_id)
             if path is None:
-                await self._refresh_file_index(timeout=5.0)
+                self._refresh_file_index()
                 path = self._file_index.get(file_id)
             if path is None:
                 raise FileNotFoundError("File is no longer available in the configured folder")
@@ -252,11 +252,16 @@ class Plugin:
             "stateFile": str(self.state_path),
         }
 
+    async def get_plugin_status(self) -> dict[str, Any]:
+        return {
+            "version": PLUGIN_VERSION,
+            "timestamp": utc_now(),
+            "activeFolder": self._settings.get("pdfFolder", DEFAULT_PDF_FOLDER),
+            "lastScan": copy.deepcopy(self._last_scan),
+        }
+
     async def get_library_diagnostics(self) -> dict[str, Any]:
-        return await asyncio.wait_for(
-            asyncio.to_thread(self._get_library_diagnostics_sync),
-            timeout=2.5,
-        )
+        return self._get_library_diagnostics_sync()
 
     def _get_library_diagnostics_sync(self) -> dict[str, Any]:
         active_folder = Path(self._settings["pdfFolder"]).expanduser()
@@ -284,16 +289,7 @@ class Plugin:
     async def get_debug_info(self) -> dict[str, Any]:
         folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
         try:
-            probe = await asyncio.wait_for(
-                asyncio.to_thread(self._probe_folder, folder),
-                timeout=2.0,
-            )
-        except TimeoutError:
-            probe = {
-                "status": "timeout",
-                "error": "Folder probe took longer than 2 seconds",
-                "entries": [],
-            }
+            probe = self._probe_folder(folder)
         except Exception as error:
             probe = {
                 "status": "error",
@@ -580,7 +576,7 @@ class Plugin:
             )
             return
 
-    async def _refresh_file_index(self, timeout: float) -> list[dict[str, Any]]:
+    def _refresh_file_index(self) -> list[dict[str, Any]]:
         folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
         self._last_scan = {
             "status": "running",
@@ -592,22 +588,7 @@ class Plugin:
 
         started = time.monotonic()
         try:
-            entries, index = await asyncio.wait_for(
-                asyncio.to_thread(self._scan_supported_files_for_folder, folder),
-                timeout=timeout,
-            )
-        except TimeoutError as error:
-            elapsed_ms = round((time.monotonic() - started) * 1000)
-            self._last_scan = {
-                "status": "timeout",
-                "folder": str(folder),
-                "count": 0,
-                "elapsedMs": elapsed_ms,
-                "error": f"Backend scan took longer than {timeout} seconds",
-            }
-            self._file_index = {}
-            self._log("error", "Library scan timed out", self._last_scan)
-            raise TimeoutError(self._last_scan["error"]) from error
+            entries, index = self._scan_supported_files_for_folder(folder)
         except Exception as error:
             elapsed_ms = round((time.monotonic() - started) * 1000)
             self._last_scan = {

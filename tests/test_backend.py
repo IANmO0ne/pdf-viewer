@@ -157,6 +157,21 @@ def test_debug_info_reports_last_scan_and_folder_probe(plugin_module):
     assert any(entry["name"] == "walkthrough.txt" for entry in debug_info["probe"]["entries"])
 
 
+def test_plugin_status_has_version_without_filesystem_probe(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+
+    async def exercise():
+        await plugin._main()
+        status = await plugin.get_plugin_status()
+        await plugin._unload()
+        return status
+
+    status = run(exercise())
+    assert status["version"] == module.PLUGIN_VERSION
+    assert status["lastScan"]["status"] == "not_started"
+
+
 def test_text_content_loads_for_text_files(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()

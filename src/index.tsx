@@ -122,6 +122,13 @@ interface DebugInfo {
   };
 }
 
+interface PluginStatus {
+  version: string;
+  timestamp: string;
+  activeFolder: string;
+  lastScan: DebugInfo["lastScan"];
+}
+
 interface PdfViewport {
   width: number;
   height: number;
@@ -172,6 +179,7 @@ const getLibraryDiagnostics = callable<[], LibraryDiagnostics>(
   "get_library_diagnostics"
 );
 const getDebugInfo = callable<[], DebugInfo>("get_debug_info");
+const getPluginStatus = callable<[], PluginStatus>("get_plugin_status");
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
@@ -396,6 +404,7 @@ function Content() {
   const [logPath, setLogPath] = useState("");
   const [diagnostics, setDiagnostics] = useState<LibraryDiagnostics | null>(null);
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
+  const [pluginStatus, setPluginStatus] = useState<PluginStatus | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -436,6 +445,26 @@ function Content() {
     } catch (error) {
       setBusyMessage("");
       await reportError("Unable to check the PDF folder", error);
+    }
+  }, [reportError]);
+
+  const loadPluginStatus = useCallback(async () => {
+    setBusyMessage("Checking PDF Viewer...");
+    setErrorMessage("");
+
+    try {
+      const [loadedSettings, loadedLogInfo, loadedStatus] = await Promise.all([
+        getSettings(),
+        getLogInfo(),
+        withTimeout(getPluginStatus(), 3_000, "Plugin status took longer than 3 seconds")
+      ]);
+      setSettings(loadedSettings);
+      setLogPath(loadedLogInfo.logFile || loadedLogInfo.logDir);
+      setPluginStatus(loadedStatus);
+      setBusyMessage("");
+    } catch (error) {
+      setBusyMessage("");
+      await reportError("Unable to load PDF Viewer status", error);
     }
   }, [reportError]);
 
@@ -483,8 +512,8 @@ function Content() {
   }, [reportError, selectedPdf]);
 
   useEffect(() => {
-    void checkFolder();
-  }, [checkFolder]);
+    void loadPluginStatus();
+  }, [loadPluginStatus]);
 
   useEffect(() => {
     if (!selectedPdf) {
@@ -696,6 +725,8 @@ function Content() {
     .map((candidate) => `${candidate.folder} (${candidate.supportedCount})`);
   const debugEntries = debugInfo?.probe.entries.slice(0, 8) ?? [];
   const visibleDebugEntries = debugEntries.slice(0, 4);
+  const displayedVersion = debugInfo?.version || pluginStatus?.version || "unknown";
+  const displayedLastScan = debugInfo?.lastScan || pluginStatus?.lastScan;
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -778,7 +809,7 @@ function Content() {
         {debugInfo ? (
           <PanelSectionRow>
             <div style={styles.smallText}>
-              <div>Build: {debugInfo.version}</div>
+              <div>Build: {displayedVersion}</div>
               <div>
                 Probe: {debugInfo.probe.status}, exists {String(debugInfo.probe.exists)}, dir{" "}
                 {String(debugInfo.probe.isDir)}
@@ -795,6 +826,18 @@ function Content() {
                   {entry.kind || entry.suffix || "unsupported"}
                 </div>
               ))}
+            </div>
+          </PanelSectionRow>
+        ) : pluginStatus ? (
+          <PanelSectionRow>
+            <div style={styles.smallText}>
+              <div>Build: {displayedVersion}</div>
+              {displayedLastScan ? (
+                <div>
+                  Last scan: {displayedLastScan.status}, {displayedLastScan.elapsedMs}ms,
+                  {` ${displayedLastScan.count}`} files
+                </div>
+              ) : null}
             </div>
           </PanelSectionRow>
         ) : null}
@@ -821,6 +864,11 @@ function Content() {
         <PanelSectionRow>
           <ButtonItem layout="inline" onClick={() => void checkFolder()}>
             <FaSyncAlt /> Check folder only
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="inline" onClick={() => void loadPluginStatus()}>
+            <FaSyncAlt /> Check backend only
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
