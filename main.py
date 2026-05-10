@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
-from xml.etree import ElementTree
 
 import decky
 
@@ -22,7 +21,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
-PLUGIN_VERSION = "0.1.15"
+PLUGIN_VERSION = "0.1.16"
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
 MIN_ZOOM = 0.5
@@ -767,20 +766,19 @@ class Plugin:
         return "\n\n".join(parts)
 
     def _html_to_text(self, raw: bytes) -> str:
-        try:
-            root = ElementTree.fromstring(raw)
-            chunks = [
-                text.strip()
-                for text in root.itertext()
-                if text and text.strip()
-            ]
-            return "\n".join(chunks)
-        except ElementTree.ParseError:
-            decoded = raw.decode("utf-8", errors="replace")
-            stripped = re.sub(r"<(script|style).*?</\1>", "", decoded, flags=re.I | re.S)
-            stripped = re.sub(r"<[^>]+>", "\n", stripped)
-            stripped = re.sub(r"\n{3,}", "\n\n", stripped)
-            return stripped.strip()
+        decoded = raw.decode("utf-8", errors="replace")
+        stripped = re.sub(r"<(script|style).*?</\1>", "", decoded, flags=re.I | re.S)
+        stripped = re.sub(r"<[^>]+>", "\n", stripped)
+        stripped = stripped.replace("&nbsp;", " ")
+        stripped = stripped.replace("&amp;", "&")
+        stripped = stripped.replace("&lt;", "<")
+        stripped = stripped.replace("&gt;", ">")
+        stripped = stripped.replace("&quot;", '"')
+        stripped = stripped.replace("&#39;", "'")
+        stripped = re.sub(r"[ \t\r\f\v]+", " ", stripped)
+        stripped = re.sub(r"\n\s+", "\n", stripped)
+        stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+        return stripped.strip()
 
     def _pdf_id(self, path: Path) -> str:
         normalized_path = str(path.resolve())

@@ -132,7 +132,7 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.15";
+const FRONTEND_BUILD = "0.1.16";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
