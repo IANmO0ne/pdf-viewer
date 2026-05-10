@@ -81,6 +81,13 @@ class Plugin:
         self._settings: dict[str, Any] = default_settings()
         self._state: dict[str, Any] = {}
         self._file_index: dict[str, Path] = {}
+        self._last_scan: dict[str, Any] = {
+            "status": "not_started",
+            "folder": "",
+            "count": 0,
+            "elapsedMs": 0,
+            "error": "",
+        }
         self._server: asyncio.AbstractServer | None = None
         self._server_port = 0
         self._token = secrets.token_urlsafe(32)
@@ -128,7 +135,7 @@ class Plugin:
 
     async def list_pdfs(self) -> list[dict[str, Any]]:
         async with self._get_lock():
-            entries = self._scan_supported_files()
+            entries = await self._refresh_file_index(timeout=5.0)
             self._log(
                 "debug",
                 "Library folder scanned",
@@ -143,8 +150,10 @@ class Plugin:
     async def get_pdf_access(self, pdf_id: str) -> dict[str, Any]:
         async with self._get_lock():
             self._validate_pdf_id(pdf_id)
-            self._scan_supported_files()
             path = self._file_index.get(pdf_id)
+            if path is None:
+                await self._refresh_file_index(timeout=5.0)
+                path = self._file_index.get(pdf_id)
             if path is None:
                 self._log("warning", "File access requested for missing file", {"id": pdf_id})
                 raise FileNotFoundError("File is no longer available in the configured folder")
@@ -161,8 +170,10 @@ class Plugin:
     async def get_text_content(self, file_id: str) -> dict[str, Any]:
         async with self._get_lock():
             self._validate_pdf_id(file_id)
-            self._scan_supported_files()
             path = self._file_index.get(file_id)
+            if path is None:
+                await self._refresh_file_index(timeout=5.0)
+                path = self._file_index.get(file_id)
             if path is None:
                 raise FileNotFoundError("File is no longer available in the configured folder")
 
@@ -241,28 +252,62 @@ class Plugin:
         }
 
     async def get_library_diagnostics(self) -> dict[str, Any]:
-        async with self._get_lock():
-            active_folder = Path(self._settings["pdfFolder"]).expanduser()
-            candidates = []
-            for folder in self._candidate_library_folders():
-                candidates.append(
-                    {
-                        "folder": str(folder),
-                        "exists": folder.exists(),
-                        "supportedCount": self._count_supported_files(
-                            folder,
-                            file_limit=QUICK_SCAN_FILES,
-                            seconds=1.0,
-                        ),
-                    }
-                )
+        return await asyncio.wait_for(
+            asyncio.to_thread(self._get_library_diagnostics_sync),
+            timeout=2.5,
+        )
 
-            return {
-                "activeFolder": str(active_folder),
-                "activeExists": active_folder.exists(),
-                "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
-                "candidates": candidates,
+    def _get_library_diagnostics_sync(self) -> dict[str, Any]:
+        active_folder = Path(self._settings["pdfFolder"]).expanduser()
+        candidates = []
+        for folder in self._candidate_library_folders():
+            candidates.append(
+                {
+                    "folder": str(folder),
+                    "exists": folder.exists(),
+                    "supportedCount": self._count_supported_files(
+                        folder,
+                        file_limit=QUICK_SCAN_FILES,
+                        seconds=1.0,
+                    ),
+                }
+            )
+
+        return {
+            "activeFolder": str(active_folder),
+            "activeExists": active_folder.exists(),
+            "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
+            "candidates": candidates,
+        }
+
+    async def get_debug_info(self) -> dict[str, Any]:
+        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
+        try:
+            probe = await asyncio.wait_for(
+                asyncio.to_thread(self._probe_folder, folder),
+                timeout=2.0,
+            )
+        except TimeoutError:
+            probe = {
+                "status": "timeout",
+                "error": "Folder probe took longer than 2 seconds",
+                "entries": [],
             }
+        except Exception as error:
+            probe = {
+                "status": "error",
+                "error": str(error),
+                "entries": [],
+            }
+
+        return {
+            "timestamp": utc_now(),
+            "settingsFolder": str(self.settings_dir),
+            "activeFolder": str(folder),
+            "lastScan": copy.deepcopy(self._last_scan),
+            "probe": probe,
+            "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
+        }
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -533,8 +578,75 @@ class Plugin:
             )
             return
 
+    async def _refresh_file_index(self, timeout: float) -> list[dict[str, Any]]:
+        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
+        self._last_scan = {
+            "status": "running",
+            "folder": str(folder),
+            "count": 0,
+            "elapsedMs": 0,
+            "error": "",
+        }
+
+        started = time.monotonic()
+        try:
+            entries, index = await asyncio.wait_for(
+                asyncio.to_thread(self._scan_supported_files_for_folder, folder),
+                timeout=timeout,
+            )
+        except TimeoutError as error:
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            self._last_scan = {
+                "status": "timeout",
+                "folder": str(folder),
+                "count": 0,
+                "elapsedMs": elapsed_ms,
+                "error": f"Backend scan took longer than {timeout} seconds",
+            }
+            self._file_index = {}
+            self._log("error", "Library scan timed out", self._last_scan)
+            raise TimeoutError(self._last_scan["error"]) from error
+        except Exception as error:
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            self._last_scan = {
+                "status": "error",
+                "folder": str(folder),
+                "count": 0,
+                "elapsedMs": elapsed_ms,
+                "error": str(error),
+            }
+            self._file_index = {}
+            self._log("error", "Library scan failed", self._last_scan)
+            raise
+
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        self._file_index = index
+        self._last_scan = {
+            "status": "ok",
+            "folder": str(folder),
+            "count": len(entries),
+            "elapsedMs": elapsed_ms,
+            "error": "",
+        }
+        return entries
+
     def _scan_supported_files(self) -> list[dict[str, Any]]:
         folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
+        entries, index = self._scan_supported_files_for_folder(folder)
+        self._file_index = index
+        self._last_scan = {
+            "status": "ok",
+            "folder": str(folder),
+            "count": len(entries),
+            "elapsedMs": 0,
+            "error": "",
+        }
+        return entries
+
+    def _scan_supported_files_for_folder(
+        self,
+        folder: Path,
+    ) -> tuple[list[dict[str, Any]], dict[str, Path]]:
         folder.mkdir(parents=True, exist_ok=True)
 
         entries: list[dict[str, Any]] = []
@@ -568,8 +680,62 @@ class Plugin:
                 )
 
         entries.sort(key=lambda entry: entry["relativePath"].casefold())
-        self._file_index = index
-        return entries
+        return entries, index
+
+    def _probe_folder(self, folder: Path) -> dict[str, Any]:
+        try:
+            exists = folder.exists()
+            is_dir = folder.is_dir()
+        except OSError as error:
+            return {
+                "status": "error",
+                "exists": False,
+                "isDir": False,
+                "error": str(error),
+                "entries": [],
+            }
+
+        result: dict[str, Any] = {
+            "status": "ok",
+            "exists": exists,
+            "isDir": is_dir,
+            "error": "",
+            "entries": [],
+        }
+        if not exists or not is_dir:
+            return result
+
+        entries: list[dict[str, Any]] = []
+        deadline = time.monotonic() + 1.5
+        try:
+            with os.scandir(folder) as iterator:
+                for entry in iterator:
+                    if time.monotonic() >= deadline or len(entries) >= 25:
+                        break
+                    try:
+                        path = Path(entry.path)
+                        entries.append(
+                            {
+                                "name": entry.name,
+                                "isFile": entry.is_file(follow_symlinks=False),
+                                "isDir": entry.is_dir(follow_symlinks=False),
+                                "suffix": path.suffix.lower(),
+                                "kind": self._kind_for_path(path),
+                            }
+                        )
+                    except OSError as error:
+                        entries.append(
+                            {
+                                "name": entry.name,
+                                "error": str(error),
+                            }
+                        )
+        except OSError as error:
+            result["status"] = "error"
+            result["error"] = str(error)
+
+        result["entries"] = entries
+        return result
 
     def _kind_for_path(self, path: Path) -> str | None:
         return SUPPORTED_EXTENSIONS.get(path.suffix.lower())
@@ -704,7 +870,6 @@ class Plugin:
 
             pdf_id = unquote(parsed.path.removeprefix("/pdf/"))
             self._validate_pdf_id(pdf_id)
-            self._scan_supported_files()
             path = self._file_index.get(pdf_id)
             if path is None:
                 await self._send_simple_response(writer, 404, "Not Found", b"Not Found")

@@ -135,6 +135,27 @@ def test_diagnostics_count_documents_child_folder_with_files(plugin_module):
     )
 
 
+def test_debug_info_reports_last_scan_and_folder_probe(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+
+    async def exercise():
+        await plugin._main()
+        pdf_folder = Path((await plugin.get_settings())["pdfFolder"])
+        (pdf_folder / "walkthrough.txt").write_text("Use the key.", encoding="utf-8")
+        entries = await plugin.list_pdfs()
+        debug_info = await plugin.get_debug_info()
+        await plugin._unload()
+        return entries, debug_info
+
+    entries, debug_info = run(exercise())
+    assert [entry["name"] for entry in entries] == ["walkthrough.txt"]
+    assert debug_info["lastScan"]["status"] == "ok"
+    assert debug_info["lastScan"]["count"] == 1
+    assert debug_info["probe"]["exists"] is True
+    assert any(entry["name"] == "walkthrough.txt" for entry in debug_info["probe"]["entries"])
+
+
 def test_text_content_loads_for_text_files(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()

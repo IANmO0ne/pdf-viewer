@@ -91,6 +91,36 @@ interface LibraryDiagnostics {
   candidates: LibraryCandidate[];
 }
 
+interface DebugEntry {
+  name: string;
+  isFile?: boolean;
+  isDir?: boolean;
+  suffix?: string;
+  kind?: LibraryKind | null;
+  error?: string;
+}
+
+interface DebugInfo {
+  timestamp: string;
+  settingsFolder: string;
+  activeFolder: string;
+  supportedExtensions: string[];
+  lastScan: {
+    status: string;
+    folder: string;
+    count: number;
+    elapsedMs: number;
+    error: string;
+  };
+  probe: {
+    status: string;
+    exists?: boolean;
+    isDir?: boolean;
+    error?: string;
+    entries: DebugEntry[];
+  };
+}
+
 interface PdfViewport {
   width: number;
   height: number;
@@ -140,6 +170,7 @@ const getLogInfo = callable<
 const getLibraryDiagnostics = callable<[], LibraryDiagnostics>(
   "get_library_diagnostics"
 );
+const getDebugInfo = callable<[], DebugInfo>("get_debug_info");
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
@@ -363,6 +394,7 @@ function Content() {
   const [renderMessage, setRenderMessage] = useState("");
   const [logPath, setLogPath] = useState("");
   const [diagnostics, setDiagnostics] = useState<LibraryDiagnostics | null>(null);
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -389,6 +421,7 @@ function Content() {
   const refreshLibrary = useCallback(async () => {
     setBusyMessage("Loading PDF folder...");
     setErrorMessage("");
+    setDebugInfo(null);
 
     try {
       const loadedPdfs = await withTimeout(
@@ -419,6 +452,12 @@ function Content() {
       }
     } catch (error) {
       setBusyMessage("");
+      const info = await withTimeout(
+        getDebugInfo(),
+        3_000,
+        "Debug snapshot took longer than 3 seconds"
+      ).catch(() => null);
+      setDebugInfo(info);
       await reportError("Unable to load the PDF folder", error);
     }
   }, [reportError, selectedPdf]);
@@ -635,6 +674,7 @@ function Content() {
     .filter((candidate) => candidate.exists)
     .slice(0, 4)
     .map((candidate) => `${candidate.folder} (${candidate.supportedCount})`);
+  const debugEntries = debugInfo?.probe.entries.slice(0, 8) ?? [];
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -737,6 +777,32 @@ function Content() {
       </PanelSection>
 
       {errorMessage ? <div style={styles.error}>{errorMessage}</div> : null}
+      {debugInfo ? (
+        <PanelSection title="Debug">
+          <PanelSectionRow>
+            <div style={styles.smallText}>
+              <div>Active: {debugInfo.activeFolder}</div>
+              <div>
+                Last scan: {debugInfo.lastScan.status}, {debugInfo.lastScan.elapsedMs}ms,
+                {` ${debugInfo.lastScan.count}`} files
+              </div>
+              {debugInfo.lastScan.error ? <div>{debugInfo.lastScan.error}</div> : null}
+              <div>
+                Probe: {debugInfo.probe.status}, exists {String(debugInfo.probe.exists)}, dir{" "}
+                {String(debugInfo.probe.isDir)}
+              </div>
+              {debugInfo.probe.error ? <div>{debugInfo.probe.error}</div> : null}
+              {debugEntries.length > 0 ? <div>First entries:</div> : null}
+              {debugEntries.map((entry) => (
+                <div key={`${entry.name}-${entry.suffix || ""}`}>
+                  {entry.name} · {entry.isFile ? "file" : entry.isDir ? "folder" : "other"} ·{" "}
+                  {entry.kind || entry.suffix || "unsupported"}
+                </div>
+              ))}
+            </div>
+          </PanelSectionRow>
+        </PanelSection>
+      ) : null}
 
       {!selectedPdf ? (
         <PanelSection>
