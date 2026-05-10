@@ -140,7 +140,7 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.20";
+const FRONTEND_BUILD = "0.1.21";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
@@ -357,8 +357,10 @@ function createPdfLoadingTask(
     standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL,
     disableFontFace: useCompatibilityRenderer,
     useSystemFonts: !useCompatibilityRenderer,
+    fontExtraProperties: true,
+    ignoreErrors: true,
     stopAtErrors: false,
-    useWorkerFetch: false
+    useWorkerFetch: true
   };
 
   if (data) {
@@ -949,7 +951,8 @@ function Content() {
             {useCompatibilityRenderer ? (
               <PanelSectionRow>
                 <div style={styles.smallText}>
-                  Font repair renderer active for this PDF.
+                  Font repair renderer active for this PDF. If square blocks remain, the
+                  PDF likely has missing or damaged embedded font mappings.
                 </div>
               </PanelSectionRow>
             ) : null}
