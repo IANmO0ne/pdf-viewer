@@ -12,6 +12,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 - Shows a Debug panel after scan failures with the active folder, last backend scan status, and a quick folder probe
 - Shows the installed build version and a folder probe before any library scan starts, which helps confirm whether Decky installed the newest zip
 - Provides separate backend-only, folder-only, and library-refresh checks to isolate Decky RPC problems from filesystem problems
+- Starts the backend in safe mode with no filesystem or HTTP-server work until a specific button needs it
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out, panning, bookmarks, and bookmark navigation

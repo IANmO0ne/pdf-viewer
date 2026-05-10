@@ -22,7 +22,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
-PLUGIN_VERSION = "0.1.10"
+PLUGIN_VERSION = "0.1.11"
 COMMON_LIBRARY_FOLDER_NAMES = (
     "PDF Seamdeck",
     "PDF Steamdeck",
@@ -93,19 +93,14 @@ class Plugin:
         self._server_port = 0
         self._token = secrets.token_urlsafe(32)
         self._lock: asyncio.Lock | None = None
+        self._storage_loaded = False
 
     async def _main(self) -> None:
         self._lock = asyncio.Lock()
-        self._ensure_plugin_dirs()
-        self._settings = self._read_json(self.settings_path, default_settings())
-        self._settings = self._sanitize_settings(self._settings)
-        self._state = self._read_json(self.state_path, {})
-        self._ensure_pdf_folder()
-        await self._start_http_server()
         self._log(
             "info",
-            "PDF Viewer started",
-            {"port": self._server_port, "pdfFolder": self._settings["pdfFolder"]},
+            "PDF Viewer backend started in safe mode",
+            {"version": PLUGIN_VERSION, "pdfFolder": self._settings["pdfFolder"]},
         )
 
     async def _unload(self) -> None:
@@ -120,13 +115,12 @@ class Plugin:
 
     async def get_settings(self) -> dict[str, Any]:
         async with self._get_lock():
-            self._settings = self._sanitize_settings(
-                self._read_json(self.settings_path, self._settings)
-            )
+            self._ensure_storage_loaded()
             return copy.deepcopy(self._settings)
 
     async def save_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         async with self._get_lock():
+            self._ensure_storage_loaded()
             merged = {**self._settings, **(settings or {})}
             self._settings = self._sanitize_settings(merged)
             self._ensure_pdf_folder()
@@ -136,6 +130,7 @@ class Plugin:
 
     async def list_pdfs(self) -> list[dict[str, Any]]:
         async with self._get_lock():
+            self._ensure_storage_loaded()
             entries = self._refresh_file_index()
             self._log(
                 "debug",
@@ -150,6 +145,7 @@ class Plugin:
 
     async def get_pdf_access(self, pdf_id: str) -> dict[str, Any]:
         async with self._get_lock():
+            self._ensure_storage_loaded()
             self._validate_pdf_id(pdf_id)
             path = self._file_index.get(pdf_id)
             if path is None:
@@ -170,6 +166,7 @@ class Plugin:
 
     async def get_text_content(self, file_id: str) -> dict[str, Any]:
         async with self._get_lock():
+            self._ensure_storage_loaded()
             self._validate_pdf_id(file_id)
             path = self._file_index.get(file_id)
             if path is None:
@@ -195,12 +192,14 @@ class Plugin:
 
     async def get_pdf_state(self, pdf_id: str) -> dict[str, Any]:
         async with self._get_lock():
+            self._ensure_storage_loaded()
             self._validate_pdf_id(pdf_id)
             state = self._state_for(pdf_id)
             return copy.deepcopy(state)
 
     async def save_pdf_position(self, pdf_id: str, page: int, zoom: float) -> dict[str, Any]:
         async with self._get_lock():
+            self._ensure_storage_loaded()
             self._validate_pdf_id(pdf_id)
             state = self._state_for(pdf_id)
             state["lastPage"] = max(1, int(page))
@@ -210,6 +209,7 @@ class Plugin:
 
     async def toggle_bookmark(self, pdf_id: str, page: int) -> dict[str, Any]:
         async with self._get_lock():
+            self._ensure_storage_loaded()
             self._validate_pdf_id(pdf_id)
             page_number = max(1, int(page))
             state = self._state_for(pdf_id)
@@ -235,6 +235,7 @@ class Plugin:
 
     async def list_bookmarks(self, pdf_id: str) -> list[dict[str, Any]]:
         async with self._get_lock():
+            self._ensure_storage_loaded()
             self._validate_pdf_id(pdf_id)
             return copy.deepcopy(self._state_for(pdf_id)["bookmarks"])
 
@@ -261,6 +262,7 @@ class Plugin:
         }
 
     async def get_library_diagnostics(self) -> dict[str, Any]:
+        self._ensure_storage_loaded()
         return self._get_library_diagnostics_sync()
 
     def _get_library_diagnostics_sync(self) -> dict[str, Any]:
@@ -287,6 +289,7 @@ class Plugin:
         }
 
     async def get_debug_info(self) -> dict[str, Any]:
+        self._ensure_storage_loaded()
         folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
         try:
             probe = self._probe_folder(folder)
@@ -311,6 +314,23 @@ class Plugin:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _ensure_storage_loaded(self) -> None:
+        if self._storage_loaded:
+            return
+
+        self._ensure_plugin_dirs()
+        self._settings = self._sanitize_settings(
+            self._read_json(self.settings_path, self._settings)
+        )
+        self._state = self._read_json(self.state_path, {})
+        self._ensure_pdf_folder()
+        self._storage_loaded = True
+        self._log(
+            "info",
+            "PDF Viewer storage loaded",
+            {"pdfFolder": self._settings["pdfFolder"]},
+        )
 
     def _ensure_plugin_dirs(self) -> None:
         self.settings_dir.mkdir(parents=True, exist_ok=True)
