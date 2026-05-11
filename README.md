@@ -10,7 +10,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 - Shows quick diagnostics for common alternate folder names and guide folders under `/home/deck/Documents` when the configured folder is empty
 - Uses bounded, non-recursive folder scans so a large or unreadable directory cannot leave the Decky panel stuck on loading forever
 - Shows a Debug panel after scan failures with the active folder, last backend scan status, and a quick folder probe
-- Shows the installed build version and a folder probe before any library scan starts, which helps confirm whether Decky installed the newest zip
+- Keeps build and backend diagnostics available through logs and status calls without cluttering the normal reader UI
 - Provides separate backend-only, folder-only, and library-refresh checks to isolate Decky RPC problems from filesystem problems
 - Starts the backend in safe mode with no filesystem or HTTP-server work until a specific button needs it
 - Opens one PDF page at a time for predictable Steam Deck overlay performance

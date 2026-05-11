@@ -156,8 +156,6 @@ interface TocItem {
 }
 
 const getPluginStatus = () => call<[], PluginStatus>("get_plugin_status");
-const saveSettings = (settings: Partial<Settings>) =>
-  call<[Partial<Settings>], Settings>("save_settings", settings);
 const listPdfs = () => call<[], PdfEntry[]>("list_pdfs");
 const getPdfAccess = (pdfId: string) =>
   call<[string], PdfAccess>("get_pdf_access", pdfId);
@@ -189,7 +187,6 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.24";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
@@ -608,7 +605,7 @@ function IconButton(props: {
 }
 
 function Content() {
-  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [settings] = useState<Settings>(DEFAULT_SETTINGS);
   const [pdfs, setPdfs] = useState<PdfEntry[]>([]);
   const [selectedPdf, setSelectedPdf] = useState<PdfEntry | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
@@ -1031,7 +1028,6 @@ function Content() {
   const currentFolder = settings.pdfFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
   const visibleFiles = pdfs.slice(0, 150);
-  const backendVersion = pluginStatus?.version || "not connected";
   const backendIsConnected = Boolean(pluginStatus);
   const nativeRendererLabel = nativeRenderStatus
     ? nativeRenderStatus.available
@@ -1148,27 +1144,11 @@ function Content() {
     }
   };
 
-  const saveZoomStep = async (value: number) => {
-    const nextSettings = await saveSettings({ zoomStep: value });
-    setSettings(nextSettings);
-  };
-
   return (
     <div style={styles.shell}>
       <PanelSection title="PDF Folder">
         <PanelSectionRow>
           <div style={styles.smallText}>{currentFolder}</div>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div style={styles.smallText}>
-            <div>Frontend build: {FRONTEND_BUILD}</div>
-            <div>Backend build: {backendVersion}</div>
-            <div>Native render: {nativeRendererLabel}</div>
-            {pluginStatus ? <div>Backend RPC: ok at {pluginStatus.timestamp}</div> : null}
-            {!backendIsConnected ? (
-              <div>Waiting for Decky to start the Python backend.</div>
-            ) : null}
-          </div>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="inline" onClick={() => void loadLibrary()}>
@@ -1340,26 +1320,6 @@ function Content() {
           {showSettings ? (
             <PanelSection title="Settings">
               <PanelSectionRow>
-                <SliderField
-                  label="Zoom step"
-                  value={Math.round(settings.zoomStep * 100)}
-                  min={5}
-                  max={100}
-                  step={5}
-                  valueSuffix="%"
-                  showValue
-                  onChange={(value) => {
-                    void saveZoomStep(clamp(value / 100, 0.05, 1));
-                  }}
-                />
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <div style={styles.smallText}>
-                  View mode: single page. Continuous scroll is intentionally disabled in v1
-                  to keep large guides responsive in the Decky overlay.
-                </div>
-              </PanelSectionRow>
-              <PanelSectionRow>
                 <ButtonItem
                   layout="below"
                   icon={<FaFont />}
@@ -1375,7 +1335,7 @@ function Content() {
                   layout="below"
                   icon={<FaImage />}
                   disabled={selectedPdf.kind !== "pdf" || !pdfDoc}
-                  description={`Uses SteamOS Poppler when available. Status: ${nativeRendererLabel}.`}
+                  description={`Uses SteamOS PDF rendering when available. Status: ${nativeRendererLabel}.`}
                   onClick={() => void toggleNativeRenderer()}
                 >
                   Native page render: {useNativeRenderer ? "On" : "Off"}
