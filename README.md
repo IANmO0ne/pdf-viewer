@@ -69,6 +69,38 @@ If `pytest` is not installed on the development machine, run:
 python -m pip install -r requirements-dev.txt
 ```
 
+## Dependency And Release Transparency
+
+The release zip is generated from this public repository with:
+
+```sh
+corepack pnpm run package
+```
+
+The zip contains only the Decky plugin files needed at runtime:
+
+- `plugin.json`
+- `package.json`
+- `main.py`
+- `LICENSE`
+- `dist/index.js`
+- `dist/pdf.worker.min.js`
+- `dist/standard_fonts/`
+- `dist/cmaps/`
+
+PDF rendering uses Mozilla PDF.js through the pinned `pdfjs-dist` package in `package.json`. During `rollup -c`, the build copies the PDF.js worker, standard fonts, and CMaps from `node_modules/pdfjs-dist` into `dist/` so the plugin can render PDFs without downloading code or assets at runtime.
+
+EPUB and text support are implemented in the Python backend with the Python standard library. The plugin does not bundle native binaries and does not require root. If a user enables `Native page render`, the backend only calls SteamOS/system PDF tools that are already present on the device, such as `pdftoppm`, `pdftocairo`, or `mutool`.
+
+Main third-party runtime dependencies:
+
+- `@decky/api` and `@decky/ui` for Decky plugin integration and UI
+- `pdfjs-dist` for PDF parsing and rendering
+- `react-icons` for toolbar icons
+- `tslib` for TypeScript helper output
+
+Development and packaging dependencies are declared in `package.json` and are not copied into the release zip except for the PDF.js runtime assets listed above.
+
 The plugin intentionally ships with single-page PDF rendering. Continuous scroll and search are future features because large strategy guides can be expensive to render inside the Decky side panel.
 
 If Decky cannot load `dist/pdf.worker.min.js` on the Steam Deck, the previous project's blob-worker approach can be added as a fallback. That is intentionally deferred until real Deck testing shows it is needed.

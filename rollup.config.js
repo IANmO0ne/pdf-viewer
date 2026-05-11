@@ -6,6 +6,8 @@ function copyPdfjsAssets() {
   return {
     name: "copy-pdfjs-assets",
     writeBundle() {
+      // Keep the release zip self-contained and reviewable: these files are copied
+      // from the pinned pdfjs-dist package during build, not downloaded at runtime.
       const source = resolve("node_modules/pdfjs-dist/legacy/build/pdf.worker.min.js");
       const target = resolve("dist/pdf.worker.min.js");
       const standardFontsSource = resolve("node_modules/pdfjs-dist/standard_fonts");

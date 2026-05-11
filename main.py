@@ -694,6 +694,8 @@ class Plugin:
         return None
 
     def _select_native_renderer(self) -> tuple[str, str] | None:
+        # These are SteamOS/system tools if already installed. The plugin does not
+        # bundle or download native PDF renderer binaries.
         for renderer in ("pdftoppm", "pdftocairo", "mutool"):
             executable = self._find_executable(renderer)
             if executable:

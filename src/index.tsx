@@ -30,6 +30,8 @@ import {
   FaSearchPlus,
   FaSyncAlt
 } from "react-icons/fa";
+
+// "legacy" is PDF.js' browser-compatible build path, not old project code.
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
 
 type ViewMode = "single";

@@ -9,6 +9,8 @@ const outDir = join(root, "out");
 const stageDir = join(outDir, slug);
 const zipPath = join(outDir, `${slug}.zip`);
 
+// Stage only the files Decky needs for local install/release review. Source maps,
+// tests, and development docs stay out of the plugin zip to keep installs quick.
 async function ensureExists(path) {
   await stat(path);
 }
