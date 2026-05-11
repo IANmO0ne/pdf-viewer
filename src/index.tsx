@@ -21,6 +21,7 @@ import {
   FaFont,
   FaHome,
   FaImage,
+  FaListOl,
   FaListUl,
   FaRegBookmark,
   FaSearchMinus,
@@ -128,12 +129,30 @@ interface PdfPageProxy {
 interface PdfDocumentProxy {
   numPages: number;
   getPage: (pageNumber: number) => Promise<PdfPageProxy>;
+  getOutline?: () => Promise<PdfOutlineItem[] | null>;
+  getDestination?: (id: string) => Promise<unknown[] | null>;
+  getPageIndex?: (ref: unknown) => Promise<number>;
   destroy?: () => Promise<void>;
 }
 
 interface PdfDocumentLoadingTask {
   promise: Promise<unknown>;
   destroy?: () => Promise<void>;
+}
+
+type PdfDestination = string | unknown[] | null | undefined;
+
+interface PdfOutlineItem {
+  title?: string;
+  dest?: PdfDestination;
+  items?: PdfOutlineItem[];
+}
+
+interface TocItem {
+  id: string;
+  title: string;
+  page: number | null;
+  depth: number;
 }
 
 const getPluginStatus = () => call<[], PluginStatus>("get_plugin_status");
@@ -170,12 +189,14 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.23";
+const FRONTEND_BUILD = "0.1.24";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 4;
-const MAX_CANVAS_PIXELS = 4_000_000;
+const MAX_ZOOM = 8;
+const MAX_CANVAS_PIXELS = 9_000_000;
+const NATIVE_RENDER_MAX_WIDTH = 3200;
+const MAX_TOC_ITEMS = 300;
 const MAX_FULL_PDF_FALLBACK_BYTES = 128 * 1024 * 1024;
 const MAX_STRUCTURAL_REPAIR_FALLBACK_BYTES = 512 * 1024 * 1024;
 const DEFAULT_SETTINGS: Settings = {
@@ -203,7 +224,7 @@ const styles = {
   },
   toolbar: {
     display: "grid",
-    gridTemplateColumns: "repeat(9, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(10, minmax(0, 1fr))",
     gap: "6px",
     alignItems: "center"
   },
@@ -277,6 +298,19 @@ const styles = {
     maxHeight: "420px",
     overflowY: "auto",
     paddingRight: "4px"
+  },
+  tocList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+    maxHeight: "360px",
+    overflowY: "auto",
+    paddingRight: "4px"
+  },
+  jumpGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: "6px"
   },
   textViewer: {
     border: "1px solid rgba(255, 255, 255, 0.12)",
@@ -380,6 +414,83 @@ function fileKindLabel(kind: LibraryKind): string {
     return "EPUB";
   }
   return "Text";
+}
+
+async function resolveOutlinePage(
+  doc: PdfDocumentProxy,
+  destination: PdfDestination
+): Promise<number | null> {
+  let target: unknown[] | null = null;
+
+  if (typeof destination === "string") {
+    target = (await doc.getDestination?.(destination)) || null;
+  } else if (Array.isArray(destination)) {
+    target = destination;
+  }
+
+  if (!target || target.length === 0) {
+    return null;
+  }
+
+  const pageRef = target[0];
+  if (typeof pageRef === "number") {
+    return pageRef + 1;
+  }
+
+  if (pageRef && typeof pageRef === "object" && doc.getPageIndex) {
+    const pageIndex = await doc.getPageIndex(pageRef);
+    return pageIndex + 1;
+  }
+
+  return null;
+}
+
+async function appendOutlineItems(
+  doc: PdfDocumentProxy,
+  items: PdfOutlineItem[],
+  depth: number,
+  prefix: string,
+  output: TocItem[]
+): Promise<void> {
+  for (let index = 0; index < items.length && output.length < MAX_TOC_ITEMS; index += 1) {
+    const item = items[index];
+    const title = String(item.title || "Untitled section").trim() || "Untitled section";
+    let page: number | null = null;
+
+    try {
+      page = await resolveOutlinePage(doc, item.dest);
+    } catch {
+      page = null;
+    }
+
+    output.push({
+      id: `${prefix}-${index}`,
+      title,
+      page,
+      depth
+    });
+
+    if (item.items?.length) {
+      await appendOutlineItems(
+        doc,
+        item.items,
+        depth + 1,
+        `${prefix}-${index}`,
+        output
+      );
+    }
+  }
+}
+
+async function loadPdfContents(doc: PdfDocumentProxy): Promise<TocItem[]> {
+  const outline = await doc.getOutline?.();
+  if (!outline?.length) {
+    return [];
+  }
+
+  const items: TocItem[] = [];
+  await appendOutlineItems(doc, outline, 0, "toc", items);
+  return items;
 }
 
 function createPdfLoadingTask(
@@ -507,7 +618,11 @@ function Content() {
   const [zoom, setZoom] = useState(1);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [showBookmarks, setShowBookmarks] = useState(false);
+  const [showContents, setShowContents] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [tocItems, setTocItems] = useState<TocItem[]>([]);
+  const [tocStatus, setTocStatus] = useState("");
+  const [jumpPage, setJumpPage] = useState(1);
   const [busyMessage, setBusyMessage] = useState("Loading PDF folder...");
   const [errorMessage, setErrorMessage] = useState("");
   const [renderMessage, setRenderMessage] = useState("");
@@ -590,6 +705,10 @@ function Content() {
       setPageCount(0);
       setPageNumber(1);
       setBookmarks([]);
+      setTocItems([]);
+      setTocStatus("");
+      setJumpPage(1);
+      setShowContents(false);
       setRenderMessage("");
       setNativePageImage(null);
       return () => undefined;
@@ -622,6 +741,9 @@ function Content() {
           setPageNumber(1);
           setZoom(1);
           setBookmarks([]);
+          setTocItems([]);
+          setTocStatus("");
+          setJumpPage(1);
           setBusyMessage("");
           return;
         }
@@ -656,6 +778,7 @@ function Content() {
         setPdfDoc(doc);
         setPageCount(doc.numPages);
         setPageNumber(safePage);
+        setJumpPage(safePage);
         setZoom(clamp(reopenPosition?.zoom || state.zoom || 1, MIN_ZOOM, MAX_ZOOM));
         setBookmarks(state.bookmarks || []);
         setBusyMessage("");
@@ -694,6 +817,61 @@ function Content() {
 
     return () => window.clearTimeout(handle);
   }, [pageNumber, pdfDoc, reportError, selectedPdf, zoom]);
+
+  useEffect(() => {
+    if (!pdfDoc || !selectedPdf || selectedPdf.kind !== "pdf") {
+      setTocItems([]);
+      setTocStatus("");
+      return () => undefined;
+    }
+
+    let cancelled = false;
+    setTocStatus("Loading table of contents...");
+    setTocItems([]);
+
+    const loadContents = async () => {
+      try {
+        const items = await withTimeout(
+          loadPdfContents(pdfDoc),
+          5_000,
+          "Table of contents took longer than 5 seconds"
+        );
+        if (cancelled) {
+          return;
+        }
+        setTocItems(items);
+        setTocStatus(
+          items.length > 0
+            ? `${items.length} table of contents item${items.length === 1 ? "" : "s"}`
+            : "No document table of contents found"
+        );
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setTocItems([]);
+        setTocStatus("No document table of contents found");
+        await withTimeout(
+          logFrontendEvent("warning", "Unable to load PDF table of contents", {
+            pdfId: selectedPdf.id,
+            error: describeError(error)
+          }),
+          1_000,
+          "Table of contents logging timed out"
+        ).catch(() => undefined);
+      }
+    };
+
+    void loadContents();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfDoc, selectedPdf]);
+
+  useEffect(() => {
+    setJumpPage(pageNumber);
+  }, [pageNumber, selectedPdf?.id]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -815,8 +993,10 @@ function Content() {
       const availableWidth = Math.max(240, viewer.clientWidth - 16);
       const outputScale = Math.min(window.devicePixelRatio || 1, 2);
       const cssWidth = Math.max(availableWidth, Math.floor(availableWidth * zoom));
-      const renderWidth = Math.floor(clamp(cssWidth * outputScale, 240, 1800));
-      setNativeImageCssWidth(Math.floor(renderWidth / outputScale));
+      const renderWidth = Math.floor(
+        clamp(cssWidth * outputScale, 240, NATIVE_RENDER_MAX_WIDTH)
+      );
+      setNativeImageCssWidth(Math.floor(cssWidth));
 
       try {
         const image = await withTimeout(
@@ -868,6 +1048,7 @@ function Content() {
     setNativePageImage(null);
     setSelectedPdf(pdf);
     setShowBookmarks(false);
+    setShowContents(false);
     setShowSettings(false);
   };
 
@@ -877,12 +1058,15 @@ function Content() {
     setNativePageImage(null);
     setSelectedPdf(null);
     setShowBookmarks(false);
+    setShowContents(false);
     setShowSettings(false);
     setErrorMessage("");
   };
 
   const changePage = (nextPage: number) => {
-    setPageNumber(clamp(Math.trunc(nextPage), 1, Math.max(1, pageCount)));
+    const safePage = clamp(Math.trunc(nextPage), 1, Math.max(1, pageCount));
+    setPageNumber(safePage);
+    setJumpPage(safePage);
     viewerRef.current?.scrollTo({ top: 0, left: 0, behavior: "smooth" });
   };
 
@@ -932,6 +1116,16 @@ function Content() {
         pdfId: selectedPdf.id
       });
     }
+  };
+
+  const toggleContents = () => {
+    setShowContents((visible) => !visible);
+    setShowBookmarks(false);
+  };
+
+  const goToPage = (page: number) => {
+    changePage(page);
+    setShowContents(false);
   };
 
   const onToggleBookmark = async () => {
@@ -1079,6 +1273,12 @@ function Content() {
                   onClick={() => void onToggleBookmark()}
                 />
                 <IconButton
+                  label="Table of contents"
+                  icon={<FaListOl />}
+                  disabled={selectedPdf.kind !== "pdf" || !pdfDoc}
+                  onClick={toggleContents}
+                />
+                <IconButton
                   label="Font repair"
                   icon={<FaFont />}
                   disabled={selectedPdf.kind !== "pdf"}
@@ -1180,6 +1380,117 @@ function Content() {
                 >
                   Native page render: {useNativeRenderer ? "On" : "Off"}
                 </ButtonItem>
+              </PanelSectionRow>
+            </PanelSection>
+          ) : null}
+
+          {showContents ? (
+            <PanelSection title="Contents">
+              <PanelSectionRow>
+                <div style={styles.smallText}>{tocStatus || "Loading table of contents..."}</div>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <SliderField
+                  label="Jump page"
+                  value={jumpPage}
+                  min={1}
+                  max={Math.max(1, pageCount)}
+                  step={1}
+                  showValue
+                  onChange={(value) => {
+                    setJumpPage(clamp(Math.trunc(value), 1, Math.max(1, pageCount)));
+                  }}
+                />
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <div style={styles.jumpGrid}>
+                  <Button
+                    disabled={pageCount <= 1}
+                    onClick={() => setJumpPage(1)}
+                  >
+                    First
+                  </Button>
+                  <Button
+                    disabled={pageCount <= 1}
+                    onClick={() =>
+                      setJumpPage(clamp(jumpPage - 100, 1, Math.max(1, pageCount)))
+                    }
+                  >
+                    -100
+                  </Button>
+                  <Button
+                    disabled={pageCount <= 1}
+                    onClick={() =>
+                      setJumpPage(clamp(jumpPage - 10, 1, Math.max(1, pageCount)))
+                    }
+                  >
+                    -10
+                  </Button>
+                  <Button
+                    disabled={pageCount <= 1}
+                    onClick={() =>
+                      setJumpPage(clamp(jumpPage + 10, 1, Math.max(1, pageCount)))
+                    }
+                  >
+                    +10
+                  </Button>
+                  <Button
+                    disabled={pageCount <= 1}
+                    onClick={() =>
+                      setJumpPage(clamp(jumpPage + 100, 1, Math.max(1, pageCount)))
+                    }
+                  >
+                    +100
+                  </Button>
+                  <Button
+                    disabled={pageCount <= 1}
+                    onClick={() => setJumpPage(Math.max(1, pageCount))}
+                  >
+                    Last
+                  </Button>
+                </div>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="inline"
+                  icon={<FaArrowRight />}
+                  disabled={!pdfDoc || pageCount <= 0}
+                  onClick={() => goToPage(jumpPage)}
+                >
+                  Go to page {jumpPage}
+                </ButtonItem>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <div style={styles.tocList}>
+                  {tocItems.length === 0 ? (
+                    <div style={styles.smallText}>
+                      This PDF does not expose a table of contents. Use page jump above.
+                    </div>
+                  ) : (
+                    tocItems.map((item) => (
+                      <ButtonItem
+                        key={item.id}
+                        layout="below"
+                        disabled={item.page === null}
+                        description={item.page ? `Page ${item.page}` : "No page target"}
+                        onClick={() => {
+                          if (item.page !== null) {
+                            goToPage(item.page);
+                          }
+                        }}
+                      >
+                        <span
+                          style={{
+                            display: "block",
+                            paddingLeft: `${Math.min(item.depth, 5) * 12}px`
+                          }}
+                        >
+                          {item.title}
+                        </span>
+                      </ButtonItem>
+                    ))
+                  )}
+                </div>
               </PanelSectionRow>
             </PanelSection>
           ) : null}

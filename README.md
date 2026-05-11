@@ -15,7 +15,8 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 - Starts the backend in safe mode with no filesystem or HTTP-server work until a specific button needs it
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
-- Supports page back/forward, home, zoom in/out, panning, bookmarks, and bookmark navigation
+- Supports page back/forward, home, zoom in/out up to 800%, panning, bookmarks, and bookmark navigation
+- Shows a table of contents for PDFs with document outlines, plus page jump controls for PDFs without outlines
 - Adds a native Poppler/MuPDF page-render fallback for PDFs that show square glyph blocks in PDF.js
 - Remembers the last page and zoom per PDF
 - Stores settings and state in Decky's plugin settings directory
