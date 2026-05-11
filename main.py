@@ -23,14 +23,10 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Steamdeck"
 )
-LEGACY_PDF_FOLDERS = tuple(
-    folder
-    for folder in os.environ.get(
-        "PDF_VIEWER_LEGACY_FOLDERS", "/home/deck/Documents/PDF Seamdeck"
-    ).split(os.pathsep)
-    if folder
+PLUGIN_VERSION = "0.1.28"
+AUTHOR_SIGNATURE = (
+    "SES Bringer of Destruction, delivering democracy one orbital strike at a time."
 )
-PLUGIN_VERSION = "0.1.27"
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
 MIN_ZOOM = 0.5
@@ -46,7 +42,6 @@ SUPPORTED_EXTENSIONS = {
 TEXT_SIZE_LIMIT_BYTES = 2 * 1024 * 1024
 MAX_LIBRARY_FILES = 500
 MAX_SCAN_SECONDS = 2.0
-QUICK_SCAN_FILES = 25
 NATIVE_RENDER_MIN_WIDTH = 240
 NATIVE_RENDER_MAX_WIDTH = 3200
 NATIVE_RENDER_TIMEOUT_SECONDS = 45
@@ -117,7 +112,7 @@ class Plugin:
         self._lock = asyncio.Lock()
         self._log(
             "info",
-            "PDF Viewer backend started in safe mode",
+            "PDF Viewer backend started",
             {"version": PLUGIN_VERSION, "pdfFolder": self._settings["pdfFolder"]},
         )
 
@@ -155,7 +150,6 @@ class Plugin:
                 "Library folder scanned",
                 {
                     "folder": self._settings["pdfFolder"],
-                    "folders": [str(folder) for folder in self._candidate_library_folders()],
                     "count": len(entries),
                     "recursive": False,
                 },
@@ -358,129 +352,7 @@ class Plugin:
         return {
             "version": PLUGIN_VERSION,
             "timestamp": utc_now(),
-        }
-
-    async def get_settings_status(self) -> dict[str, Any]:
-        async with self._get_lock():
-            try:
-                self._ensure_plugin_dirs()
-                settings_existed = self.settings_path.exists()
-                loaded_settings = self._sanitize_settings(
-                    self._read_json(self.settings_path, self._settings)
-                )
-                if not settings_existed:
-                    self._write_json(self.settings_path, loaded_settings)
-
-                self._settings = loaded_settings
-                return {
-                    "version": PLUGIN_VERSION,
-                    "timestamp": utc_now(),
-                    "ok": True,
-                    "settingsFile": str(self.settings_path),
-                    "settingsExists": self.settings_path.exists(),
-                    "stateFile": str(self.state_path),
-                    "logDir": str(self.log_dir),
-                    "pdfFolder": loaded_settings["pdfFolder"],
-                    "error": "",
-                }
-            except Exception as error:
-                self._log(
-                    "error",
-                    "Settings status check failed",
-                    {"error": str(error), "traceback": traceback.format_exc(limit=5)},
-                )
-                return {
-                    "version": PLUGIN_VERSION,
-                    "timestamp": utc_now(),
-                    "ok": False,
-                    "settingsFile": str(self.settings_path),
-                    "settingsExists": False,
-                    "stateFile": str(self.state_path),
-                    "logDir": str(self.log_dir),
-                    "pdfFolder": self._settings.get("pdfFolder", DEFAULT_PDF_FOLDER),
-                    "error": str(error),
-                }
-
-    async def get_folder_probe(self) -> dict[str, Any]:
-        folder = Path(DEFAULT_PDF_FOLDER).expanduser().absolute()
-        try:
-            probe = self._probe_folder(folder)
-            return {
-                "version": PLUGIN_VERSION,
-                "timestamp": utc_now(),
-                "folder": str(folder),
-                "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
-                "probe": probe,
-            }
-        except Exception as error:
-            self._log(
-                "error",
-                "Folder probe failed",
-                {
-                    "folder": str(folder),
-                    "error": str(error),
-                    "traceback": traceback.format_exc(limit=5),
-                },
-            )
-            return {
-                "version": PLUGIN_VERSION,
-                "timestamp": utc_now(),
-                "folder": str(folder),
-                "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
-                "probe": {
-                    "status": "error",
-                    "exists": False,
-                    "isDir": False,
-                    "error": str(error),
-                    "entries": [],
-                },
-            }
-
-    async def get_library_diagnostics(self) -> dict[str, Any]:
-        self._ensure_storage_loaded()
-        return self._get_library_diagnostics_sync()
-
-    def _get_library_diagnostics_sync(self) -> dict[str, Any]:
-        active_folder = Path(self._settings["pdfFolder"]).expanduser()
-        candidate_folders = self._candidate_library_folders()
-        return {
-            "activeFolder": str(active_folder),
-            "activeExists": active_folder.exists(),
-            "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
-            "candidates": [
-                {
-                    "folder": str(folder),
-                    "exists": folder.exists(),
-                    "supportedCount": self._count_supported_files(
-                        folder,
-                        file_limit=QUICK_SCAN_FILES,
-                        seconds=1.0,
-                    ),
-                }
-                for folder in candidate_folders
-            ],
-        }
-
-    async def get_debug_info(self) -> dict[str, Any]:
-        self._ensure_storage_loaded()
-        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
-        try:
-            probe = self._probe_folder(folder)
-        except Exception as error:
-            probe = {
-                "status": "error",
-                "error": str(error),
-                "entries": [],
-            }
-
-        return {
-            "version": PLUGIN_VERSION,
-            "timestamp": utc_now(),
-            "settingsFolder": str(self.settings_dir),
-            "activeFolder": str(folder),
-            "lastScan": copy.deepcopy(self._last_scan),
-            "probe": probe,
-            "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
+            "signature": AUTHOR_SIGNATURE,
         }
 
     def _get_lock(self) -> asyncio.Lock:
@@ -514,23 +386,6 @@ class Plugin:
         folder = self._settings.get("pdfFolder") or DEFAULT_PDF_FOLDER
         path = Path(folder).expanduser()
         path.mkdir(parents=True, exist_ok=True)
-
-    def _candidate_library_folders(self) -> list[Path]:
-        active_folder = Path(self._settings.get("pdfFolder") or DEFAULT_PDF_FOLDER)
-        active_folder = active_folder.expanduser().absolute()
-        folders = [active_folder]
-        seen = {str(active_folder)}
-
-        for legacy_folder in LEGACY_PDF_FOLDERS:
-            candidate = Path(legacy_folder).expanduser().absolute()
-            candidate_key = str(candidate)
-            if candidate_key in seen:
-                continue
-            if candidate.exists() and candidate.is_dir():
-                folders.append(candidate)
-                seen.add(candidate_key)
-
-        return folders
 
     def _read_json(self, path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
         if not path.exists():
@@ -619,27 +474,6 @@ class Plugin:
             value = 1.0
         return round(min(MAX_ZOOM, max(MIN_ZOOM, value)), 2)
 
-    def _count_supported_files(
-        self,
-        folder: Path,
-        file_limit: int = QUICK_SCAN_FILES,
-        seconds: float = 1.0,
-    ) -> int:
-        try:
-            if not folder.exists() or not folder.is_dir():
-                return 0
-        except OSError:
-            return 0
-
-        count = 0
-        for _path, _kind in self._iter_supported_files(
-            folder,
-            file_limit=file_limit,
-            seconds=seconds,
-        ):
-            count += 1
-        return count
-
     def _iter_supported_files(
         self,
         folder: Path,
@@ -693,12 +527,10 @@ class Plugin:
             return
 
     def _refresh_file_index(self) -> list[dict[str, Any]]:
-        folders = self._candidate_library_folders()
-        primary_folder = folders[0]
+        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
         self._last_scan = {
             "status": "running",
-            "folder": str(primary_folder),
-            "folders": [str(folder) for folder in folders],
+            "folder": str(folder),
             "count": 0,
             "elapsedMs": 0,
             "error": "",
@@ -706,13 +538,12 @@ class Plugin:
 
         started = time.monotonic()
         try:
-            entries, index = self._scan_supported_files_for_folders(folders)
+            entries, index = self._scan_supported_files_for_folder(folder)
         except Exception as error:
             elapsed_ms = round((time.monotonic() - started) * 1000)
             self._last_scan = {
                 "status": "error",
-                "folder": str(primary_folder),
-                "folders": [str(folder) for folder in folders],
+                "folder": str(folder),
                 "count": 0,
                 "elapsedMs": elapsed_ms,
                 "error": str(error),
@@ -725,8 +556,7 @@ class Plugin:
         self._file_index = index
         self._last_scan = {
             "status": "ok",
-            "folder": str(primary_folder),
-            "folders": [str(folder) for folder in folders],
+            "folder": str(folder),
             "count": len(entries),
             "elapsedMs": elapsed_ms,
             "error": "",
@@ -734,46 +564,23 @@ class Plugin:
         return entries
 
     def _scan_supported_files(self) -> list[dict[str, Any]]:
-        folders = self._candidate_library_folders()
-        entries, index = self._scan_supported_files_for_folders(folders)
+        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
+        entries, index = self._scan_supported_files_for_folder(folder)
         self._file_index = index
         self._last_scan = {
             "status": "ok",
-            "folder": str(folders[0]),
-            "folders": [str(folder) for folder in folders],
+            "folder": str(folder),
             "count": len(entries),
             "elapsedMs": 0,
             "error": "",
         }
         return entries
 
-    def _scan_supported_files_for_folders(
-        self,
-        folders: list[Path],
-    ) -> tuple[list[dict[str, Any]], dict[str, Path]]:
-        entries: list[dict[str, Any]] = []
-        index: dict[str, Path] = {}
-
-        for folder_index, folder in enumerate(folders):
-            folder_entries, folder_index_map = self._scan_supported_files_for_folder(
-                folder,
-                create=folder_index == 0,
-            )
-            entries.extend(folder_entries)
-            index.update(folder_index_map)
-
-        entries.sort(key=lambda entry: entry["relativePath"].casefold())
-        return entries, index
-
     def _scan_supported_files_for_folder(
         self,
         folder: Path,
-        create: bool = True,
     ) -> tuple[list[dict[str, Any]], dict[str, Path]]:
-        if create:
-            folder.mkdir(parents=True, exist_ok=True)
-        elif not folder.exists() or not folder.is_dir():
-            return [], {}
+        folder.mkdir(parents=True, exist_ok=True)
 
         entries: list[dict[str, Any]] = []
         index: dict[str, Path] = {}
@@ -807,61 +614,6 @@ class Plugin:
 
         entries.sort(key=lambda entry: entry["relativePath"].casefold())
         return entries, index
-
-    def _probe_folder(self, folder: Path) -> dict[str, Any]:
-        try:
-            exists = folder.exists()
-            is_dir = folder.is_dir()
-        except OSError as error:
-            return {
-                "status": "error",
-                "exists": False,
-                "isDir": False,
-                "error": str(error),
-                "entries": [],
-            }
-
-        result: dict[str, Any] = {
-            "status": "ok",
-            "exists": exists,
-            "isDir": is_dir,
-            "error": "",
-            "entries": [],
-        }
-        if not exists or not is_dir:
-            return result
-
-        entries: list[dict[str, Any]] = []
-        deadline = time.monotonic() + 1.5
-        try:
-            with os.scandir(folder) as iterator:
-                for entry in iterator:
-                    if time.monotonic() >= deadline or len(entries) >= 25:
-                        break
-                    try:
-                        path = Path(entry.path)
-                        entries.append(
-                            {
-                                "name": entry.name,
-                                "isFile": entry.is_file(follow_symlinks=False),
-                                "isDir": entry.is_dir(follow_symlinks=False),
-                                "suffix": path.suffix.lower(),
-                                "kind": self._kind_for_path(path),
-                            }
-                        )
-                    except OSError as error:
-                        entries.append(
-                            {
-                                "name": entry.name,
-                                "error": str(error),
-                            }
-                        )
-        except OSError as error:
-            result["status"] = "error"
-            result["error"] = str(error)
-
-        result["entries"] = entries
-        return result
 
     def _kind_for_path(self, path: Path) -> str | None:
         return SUPPORTED_EXTENSIONS.get(path.suffix.lower())

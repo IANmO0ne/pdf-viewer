@@ -40,7 +40,6 @@ def plugin_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setitem(sys.modules, "decky", fake_decky)
     monkeypatch.setenv("PDF_VIEWER_DEFAULT_FOLDER", str(tmp_path / "PDF Steamdeck"))
-    monkeypatch.setenv("PDF_VIEWER_LEGACY_FOLDERS", str(tmp_path / "PDF Seamdeck"))
     sys.modules.pop("main", None)
 
     root = Path(__file__).resolve().parents[1]
@@ -88,31 +87,27 @@ def test_default_folder_is_created_and_supported_listing_is_fast_non_recursive(p
     assert entries[0]["sizeBytes"] > 0
 
 
-def test_diagnostics_reports_default_and_legacy_folder(plugin_module):
+def test_only_default_folder_is_scanned_after_folder_rename(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
     async def exercise():
         default_folder = Path(module.DEFAULT_PDF_FOLDER)
-        legacy_folder = default_folder.parent / "PDF Seamdeck"
-        legacy_folder.mkdir(parents=True)
-        (legacy_folder / "legacy-guide.pdf").write_bytes(b"%PDF-1.7\n")
+        old_test_folder = default_folder.parent / "PDF Seamdeck"
+        old_test_folder.mkdir(parents=True)
+        (old_test_folder / "old-guide.pdf").write_bytes(b"%PDF-1.7\n")
+        default_folder.mkdir(parents=True)
+        (default_folder / "current-guide.pdf").write_bytes(b"%PDF-1.7\n")
 
         await plugin._main()
         settings = await plugin.get_settings()
-        diagnostics = await plugin.get_library_diagnostics()
         entries = await plugin.list_pdfs()
         await plugin._unload()
-        return settings, diagnostics, entries
+        return settings, entries
 
-    settings, diagnostics, entries = run(exercise())
+    settings, entries = run(exercise())
     assert Path(settings["pdfFolder"]).name == "PDF Steamdeck"
-    assert diagnostics["activeFolder"] == settings["pdfFolder"]
-    assert [Path(candidate["folder"]).name for candidate in diagnostics["candidates"]] == [
-        "PDF Steamdeck",
-        "PDF Seamdeck",
-    ]
-    assert [entry["name"] for entry in entries] == ["legacy-guide.pdf"]
+    assert [entry["name"] for entry in entries] == ["current-guide.pdf"]
 
 
 def test_settings_always_use_default_pdf_folder(plugin_module):
@@ -129,7 +124,7 @@ def test_settings_always_use_default_pdf_folder(plugin_module):
     assert settings["pdfFolder"] == module.DEFAULT_PDF_FOLDER
 
 
-def test_debug_info_reports_last_scan_and_folder_probe(plugin_module):
+def test_last_scan_tracks_library_refresh(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
@@ -138,17 +133,15 @@ def test_debug_info_reports_last_scan_and_folder_probe(plugin_module):
         pdf_folder = Path((await plugin.get_settings())["pdfFolder"])
         (pdf_folder / "walkthrough.txt").write_text("Use the key.", encoding="utf-8")
         entries = await plugin.list_pdfs()
-        debug_info = await plugin.get_debug_info()
+        last_scan = plugin._last_scan
         await plugin._unload()
-        return entries, debug_info
+        return entries, last_scan
 
-    entries, debug_info = run(exercise())
+    entries, last_scan = run(exercise())
     assert [entry["name"] for entry in entries] == ["walkthrough.txt"]
-    assert debug_info["version"] == module.PLUGIN_VERSION
-    assert debug_info["lastScan"]["status"] == "ok"
-    assert debug_info["lastScan"]["count"] == 1
-    assert debug_info["probe"]["exists"] is True
-    assert any(entry["name"] == "walkthrough.txt" for entry in debug_info["probe"]["entries"])
+    assert last_scan["status"] == "ok"
+    assert last_scan["count"] == 1
+    assert Path(last_scan["folder"]).name == "PDF Steamdeck"
 
 
 def test_plugin_status_has_version_without_filesystem_probe(plugin_module):
@@ -164,6 +157,7 @@ def test_plugin_status_has_version_without_filesystem_probe(plugin_module):
 
     status, default_folder_exists = run(exercise())
     assert status["version"] == module.PLUGIN_VERSION
+    assert status["signature"] == module.AUTHOR_SIGNATURE
     assert "lastScan" not in status
     assert default_folder_exists is False
 
@@ -179,7 +173,6 @@ def test_backend_initializes_from_environment_when_decky_constants_are_missing(
     monkeypatch.setenv("DECKY_PLUGIN_RUNTIME_DIR", str(tmp_path / "runtime-from-env"))
     monkeypatch.setenv("DECKY_PLUGIN_LOG_DIR", str(tmp_path / "logs-from-env"))
     monkeypatch.setenv("PDF_VIEWER_DEFAULT_FOLDER", str(tmp_path / "PDF Steamdeck"))
-    monkeypatch.setenv("PDF_VIEWER_LEGACY_FOLDERS", str(tmp_path / "PDF Seamdeck"))
     sys.modules.pop("main", None)
 
     root = Path(__file__).resolve().parents[1]
@@ -198,47 +191,6 @@ def test_backend_initializes_from_environment_when_decky_constants_are_missing(
     status = run(exercise())
     assert status["version"] == module.PLUGIN_VERSION
     assert plugin.settings_dir == tmp_path / "settings-from-env"
-
-
-def test_settings_status_loads_settings_without_creating_pdf_folder(plugin_module):
-    module, _logger = plugin_module
-    plugin = module.Plugin()
-
-    async def exercise():
-        await plugin._main()
-        status = await plugin.get_settings_status()
-        default_folder_exists = Path(module.DEFAULT_PDF_FOLDER).exists()
-        await plugin._unload()
-        return status, default_folder_exists
-
-    status, default_folder_exists = run(exercise())
-    assert status["ok"] is True
-    assert status["version"] == module.PLUGIN_VERSION
-    assert status["settingsExists"] is True
-    assert Path(status["settingsFile"]).exists()
-    assert default_folder_exists is False
-
-
-def test_folder_probe_reads_default_folder_without_settings_load(plugin_module):
-    module, _logger = plugin_module
-    plugin = module.Plugin()
-    folder = Path(module.DEFAULT_PDF_FOLDER)
-    folder.mkdir(parents=True)
-    (folder / "guide.pdf").write_bytes(b"%PDF-1.7\n")
-    (folder / "cover.png").write_bytes(b"not supported")
-
-    async def exercise():
-        await plugin._main()
-        probe = await plugin.get_folder_probe()
-        await plugin._unload()
-        return probe
-
-    probe = run(exercise())
-    assert probe["version"] == module.PLUGIN_VERSION
-    assert probe["folder"] == str(folder.absolute())
-    assert probe["probe"]["exists"] is True
-    assert probe["probe"]["isDir"] is True
-    assert any(entry["name"] == "guide.pdf" for entry in probe["probe"]["entries"])
 
 
 def test_text_content_loads_for_text_files(plugin_module):

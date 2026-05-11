@@ -5,7 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["pdf", "reader", "utility"],
-    "description": "Read PDF strategy guides from the Decky Quick Access Menu while playing on Steam Deck.",
+    "description": "Read PDF, EPUB, TXT, and Markdown strategy guides from the Decky Quick Access Menu while playing on Steam Deck.",
     "image": "https://raw.githubusercontent.com/SteamDeckHomebrew/decky-plugin-template/main/assets/logo.png"
   }
 }

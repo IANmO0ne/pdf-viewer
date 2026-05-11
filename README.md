@@ -7,11 +7,9 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 ## V1 Features
 
 - Lists `.pdf`, `.epub`, `.txt`, and `.md` files directly from `/home/deck/Documents/PDF Steamdeck`
-- Keeps a legacy fallback for `/home/deck/Documents/PDF Seamdeck` so early test installs do not lose their library after updating
 - Uses bounded, non-recursive folder scans so a large or unreadable directory cannot leave the Decky panel stuck on loading forever
 - Filters the file list by name or type
-- Keeps backend diagnostics available through logs and status calls without cluttering the normal reader UI
-- Starts the backend in safe mode with no filesystem or HTTP-server work until the reader needs it
+- Starts the backend with no filesystem or HTTP-server work until the reader needs it
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out up to 800%, panning, bookmarks, and bookmark navigation
@@ -29,7 +27,6 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 
 1. Put your guides in `/home/deck/Documents/PDF Steamdeck`.
    Files must be directly inside this folder for the current build. Subfolder scanning is disabled to keep refreshes quick in Gaming Mode.
-   The old test folder `/home/deck/Documents/PDF Seamdeck` is still scanned as a fallback, but new installs should use `PDF Steamdeck`.
 2. Build the plugin from this repository:
 
    ```sh
@@ -49,6 +46,8 @@ If a PDF page opens but text appears as square blocks, open the settings gear wh
 The GitHub release flow is the intended publish path once Steam Deck testing confirms the plugin behaves well in Gaming Mode. Upload `out/decky-pdf-viewer.zip` to a release, then download and install that zip on the Deck.
 
 The test zip intentionally omits source maps and extra docs so Decky's local installer has less work to parse in Gaming Mode.
+
+Author signature: SES Bringer of Destruction, delivering democracy one orbital strike at a time.
 
 ### Direct Copy Notes
 

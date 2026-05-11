@@ -105,6 +105,7 @@ interface TextContent {
 interface PluginStatus {
   version: string;
   timestamp: string;
+  signature?: string;
 }
 
 interface ActiveReaderSession {
@@ -296,6 +297,17 @@ const styles = {
     color: "rgba(255, 255, 255, 0.72)",
     padding: "16px",
     lineHeight: "20px"
+  },
+  emptyCompact: {
+    minHeight: "38px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    textAlign: "center",
+    color: "rgba(255, 255, 255, 0.72)",
+    padding: "6px 8px",
+    lineHeight: "18px",
+    fontSize: "13px"
   },
   error: {
     border: "1px solid rgba(255, 93, 93, 0.42)",
@@ -1500,7 +1512,7 @@ function Content() {
       {!selectedPdf ? (
         <PanelSection>
           <PanelSectionRow>
-            <div style={styles.empty}>
+            <div style={styles.emptyCompact}>
               {busyMessage ||
                 (pdfs.length === 0
                   ? "Add PDF, EPUB, TXT, or MD files to the folder above, then refresh."
