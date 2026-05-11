@@ -18,6 +18,8 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 - Supports page back/forward, home, zoom in/out up to 800%, panning, bookmarks, and bookmark navigation
 - Shows a table of contents for PDFs with document outlines, plus page jump controls for PDFs without outlines
 - Adds a native Poppler/MuPDF page-render fallback for PDFs that show square glyph blocks in PDF.js
+- Reopens the last active file after the Quick Access Menu closes; pressing Home clears that active file
+- Includes a clear zoom button step setting so users can choose how much the zoom buttons move at high zoom levels
 - Remembers the last page and zoom per PDF
 - Stores settings and state in Decky's plugin settings directory
 - Logs backend and frontend errors with timestamps through Decky's plugin logger

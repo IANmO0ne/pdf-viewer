@@ -105,6 +105,13 @@ interface PluginStatus {
   timestamp: string;
 }
 
+interface ActiveReaderSession {
+  fileId: string;
+  page?: number;
+  zoom?: number;
+  updatedAt: string;
+}
+
 interface PdfViewport {
   width: number;
   height: number;
@@ -156,6 +163,9 @@ interface TocItem {
 }
 
 const getPluginStatus = () => call<[], PluginStatus>("get_plugin_status");
+const getSettings = () => call<[], Settings>("get_settings");
+const saveSettings = (settings: Partial<Settings>) =>
+  call<[Partial<Settings>], Settings>("save_settings", settings);
 const listPdfs = () => call<[], PdfEntry[]>("list_pdfs");
 const getPdfAccess = (pdfId: string) =>
   call<[string], PdfAccess>("get_pdf_access", pdfId);
@@ -189,6 +199,8 @@ const logFrontendEvent = (
 
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
+const ACTIVE_SESSION_STORAGE_KEY = "decky-pdf-viewer.activeReaderSession";
+const ZOOM_STEP_STORAGE_KEY = "decky-pdf-viewer.zoomStep";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 8;
 const MAX_CANVAS_PIXELS = 9_000_000;
@@ -332,6 +344,89 @@ const styles = {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function readStorage(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Storage is a convenience cache. Backend state remains the source of truth.
+  }
+}
+
+function removeStorage(key: string): void {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Ignore storage failures in the Decky overlay.
+  }
+}
+
+function sanitizeZoomStep(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? clamp(parsed, 0.05, 1) : DEFAULT_SETTINGS.zoomStep;
+}
+
+function loadInitialSettings(): Settings {
+  return {
+    ...DEFAULT_SETTINGS,
+    zoomStep: sanitizeZoomStep(readStorage(ZOOM_STEP_STORAGE_KEY))
+  };
+}
+
+function readActiveReaderSession(): ActiveReaderSession | null {
+  const rawValue = readStorage(ACTIVE_SESSION_STORAGE_KEY);
+  if (!rawValue) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as Partial<ActiveReaderSession>;
+    if (!parsed || typeof parsed.fileId !== "string" || parsed.fileId.length === 0) {
+      return null;
+    }
+
+    return {
+      fileId: parsed.fileId,
+      page: Number.isFinite(parsed.page)
+        ? Math.max(1, Math.trunc(Number(parsed.page)))
+        : undefined,
+      zoom: Number.isFinite(parsed.zoom)
+        ? clamp(Number(parsed.zoom), MIN_ZOOM, MAX_ZOOM)
+        : undefined,
+      updatedAt:
+        typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString()
+    };
+  } catch {
+    removeStorage(ACTIVE_SESSION_STORAGE_KEY);
+    return null;
+  }
+}
+
+function writeActiveReaderSession(fileId: string, page?: number, zoom?: number): void {
+  const session: ActiveReaderSession = {
+    fileId,
+    updatedAt: new Date().toISOString()
+  };
+  if (Number.isFinite(page)) {
+    session.page = Math.max(1, Math.trunc(Number(page)));
+  }
+  if (Number.isFinite(zoom)) {
+    session.zoom = clamp(Number(zoom), MIN_ZOOM, MAX_ZOOM);
+  }
+  writeStorage(ACTIVE_SESSION_STORAGE_KEY, JSON.stringify(session));
+}
+
+function clearActiveReaderSession(): void {
+  removeStorage(ACTIVE_SESSION_STORAGE_KEY);
 }
 
 function formatBytes(value: number): string {
@@ -605,7 +700,7 @@ function IconButton(props: {
 }
 
 function Content() {
-  const [settings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<Settings>(loadInitialSettings);
   const [pdfs, setPdfs] = useState<PdfEntry[]>([]);
   const [selectedPdf, setSelectedPdf] = useState<PdfEntry | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
@@ -636,6 +731,8 @@ function Content() {
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const activeRenderRef = useRef<PdfRenderTask | null>(null);
   const reopenPositionRef = useRef<{ page: number; zoom: number } | null>(null);
+  const restoredActiveFileRef = useRef(false);
+  const zoomStepSaveHandleRef = useRef<number | null>(null);
 
   const reportError = useCallback(
     async (
@@ -668,6 +765,26 @@ function Content() {
         "Python backend did not answer within 3 seconds"
       );
       setPluginStatus(loadedStatus);
+
+      void withTimeout(
+        getSettings(),
+        2_000,
+        "Settings load took longer than 2 seconds"
+      )
+        .then((loadedSettings) => {
+          const zoomStep = sanitizeZoomStep(loadedSettings.zoomStep);
+          setSettings({ ...DEFAULT_SETTINGS, ...loadedSettings, zoomStep });
+          writeStorage(ZOOM_STEP_STORAGE_KEY, String(zoomStep));
+        })
+        .catch((error: unknown) => {
+          void withTimeout(
+            logFrontendEvent("warning", "Unable to load saved settings", {
+              error: describeError(error)
+            }),
+            1_000,
+            "Settings load warning logging timed out"
+          ).catch(() => undefined);
+        });
 
       void withTimeout(
         getNativeRenderStatus(),
@@ -766,9 +883,12 @@ function Content() {
 
         openedDoc = doc;
         const reopenPosition = reopenPositionRef.current;
+        const activeSession = readActiveReaderSession();
+        const sessionPosition =
+          activeSession?.fileId === selectedPdf.id ? activeSession : null;
         reopenPositionRef.current = null;
         const safePage = clamp(
-          Math.trunc(reopenPosition?.page || state.lastPage || 1),
+          Math.trunc(reopenPosition?.page || sessionPosition?.page || state.lastPage || 1),
           1,
           doc.numPages
         );
@@ -776,7 +896,9 @@ function Content() {
         setPageCount(doc.numPages);
         setPageNumber(safePage);
         setJumpPage(safePage);
-        setZoom(clamp(reopenPosition?.zoom || state.zoom || 1, MIN_ZOOM, MAX_ZOOM));
+        setZoom(
+          clamp(reopenPosition?.zoom || sessionPosition?.zoom || state.zoom || 1, MIN_ZOOM, MAX_ZOOM)
+        );
         setBookmarks(state.bookmarks || []);
         setBusyMessage("");
       } catch (error) {
@@ -801,6 +923,8 @@ function Content() {
     if (!selectedPdf || !pdfDoc || selectedPdf.kind !== "pdf") {
       return () => undefined;
     }
+
+    writeActiveReaderSession(selectedPdf.id, pageNumber, zoom);
 
     const handle = window.setTimeout(() => {
       void savePdfPosition(selectedPdf.id, pageNumber, zoom).catch((error: unknown) => {
@@ -1037,21 +1161,47 @@ function Content() {
   const showPdfIntegrityHint =
     selectedPdf?.kind === "pdf" && errorMessage && isPdfIntegrityMessage(errorMessage);
 
-  const selectPdf = (pdfId: string) => {
+  const selectPdf = useCallback((pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
     setUseCompatibilityRenderer(false);
     setUseNativeRenderer(false);
     setNativePageImage(null);
+    if (pdf) {
+      writeActiveReaderSession(pdf.id);
+    } else {
+      clearActiveReaderSession();
+    }
     setSelectedPdf(pdf);
     setShowBookmarks(false);
     setShowContents(false);
     setShowSettings(false);
-  };
+  }, [pdfs]);
+
+  useEffect(() => {
+    if (restoredActiveFileRef.current || selectedPdf || pdfs.length === 0) {
+      return;
+    }
+
+    const activeSession = readActiveReaderSession();
+    if (!activeSession) {
+      restoredActiveFileRef.current = true;
+      return;
+    }
+
+    const activeFile = pdfs.find((candidate) => candidate.id === activeSession.fileId);
+    restoredActiveFileRef.current = true;
+    if (activeFile) {
+      selectPdf(activeFile.id);
+    } else {
+      clearActiveReaderSession();
+    }
+  }, [pdfs, selectPdf, selectedPdf]);
 
   const goHome = () => {
     setUseCompatibilityRenderer(false);
     setUseNativeRenderer(false);
     setNativePageImage(null);
+    clearActiveReaderSession();
     setSelectedPdf(null);
     setShowBookmarks(false);
     setShowContents(false);
@@ -1069,6 +1219,55 @@ function Content() {
   const changeZoom = (nextZoom: number) => {
     setZoom(clamp(Number(nextZoom.toFixed(2)), MIN_ZOOM, MAX_ZOOM));
   };
+
+  const saveZoomStep = (value: number) => {
+    const nextZoomStep = sanitizeZoomStep(value);
+    setSettings((currentSettings) => ({
+      ...currentSettings,
+      zoomStep: nextZoomStep
+    }));
+    writeStorage(ZOOM_STEP_STORAGE_KEY, String(nextZoomStep));
+
+    if (zoomStepSaveHandleRef.current !== null) {
+      window.clearTimeout(zoomStepSaveHandleRef.current);
+    }
+
+    zoomStepSaveHandleRef.current = window.setTimeout(() => {
+      zoomStepSaveHandleRef.current = null;
+      void withTimeout(
+        saveSettings({ zoomStep: nextZoomStep }),
+        2_000,
+        "Zoom step save took longer than 2 seconds"
+      )
+        .then((savedSettings) => {
+          const savedZoomStep = sanitizeZoomStep(savedSettings.zoomStep);
+          setSettings((currentSettings) => ({
+            ...currentSettings,
+            ...savedSettings,
+            zoomStep: savedZoomStep
+          }));
+          writeStorage(ZOOM_STEP_STORAGE_KEY, String(savedZoomStep));
+        })
+        .catch((error: unknown) => {
+          void withTimeout(
+            logFrontendEvent("warning", "Unable to save zoom button step", {
+              zoomStep: nextZoomStep,
+              error: describeError(error)
+            }),
+            1_000,
+            "Zoom step save warning logging timed out"
+          ).catch(() => undefined);
+        });
+    }, 500);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (zoomStepSaveHandleRef.current !== null) {
+        window.clearTimeout(zoomStepSaveHandleRef.current);
+      }
+    };
+  }, []);
 
   const toggleFontRepair = () => {
     reopenPositionRef.current = { page: pageNumber, zoom };
@@ -1319,6 +1518,19 @@ function Content() {
 
           {showSettings ? (
             <PanelSection title="Settings">
+              <PanelSectionRow>
+                <SliderField
+                  label="Zoom button step"
+                  description="Changes how much the + and - zoom buttons move each press. This does not change the current zoom by itself."
+                  value={Math.round(settings.zoomStep * 100)}
+                  min={5}
+                  max={100}
+                  step={5}
+                  valueSuffix="%"
+                  showValue
+                  onChange={(value) => saveZoomStep(value / 100)}
+                />
+              </PanelSectionRow>
               <PanelSectionRow>
                 <ButtonItem
                   layout="below"
