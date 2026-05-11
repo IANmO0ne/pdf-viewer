@@ -23,6 +23,14 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 - Logs backend and frontend errors with timestamps through Decky's plugin logger
 - Serves PDFs locally from `127.0.0.1` with token-protected URLs and HTTP Range support for PDF.js
 
+## Screenshots
+
+![PDF Viewer file picker](assets/screenshots/pdf_selecter_example1.jpg)
+
+![PDF Viewer controls](assets/screenshots/pdf_menu_bar.jpg)
+
+![PDF Viewer reading a PDF in the Quick Access Menu](assets/screenshots/pdf_reader_in_qam.jpg)
+
 ## Steam Deck Install For Testing
 
 1. Put your guides in `/home/deck/Documents/PDF Steamdeck`.
