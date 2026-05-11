@@ -1513,14 +1513,14 @@ function Content() {
 
       {!selectedPdf ? (
         <PanelSection>
-          <PanelSectionRow>
-            <div style={styles.emptyCompact}>
-              {busyMessage ||
-                (pdfs.length === 0
-                  ? "Add PDF, EPUB, TXT, or MD files to the folder above, then refresh."
-                  : "Choose a file below.")}
-            </div>
-          </PanelSectionRow>
+          {busyMessage || pdfs.length === 0 ? (
+            <PanelSectionRow>
+              <div style={styles.emptyCompact}>
+                {busyMessage ||
+                  "Add PDF, EPUB, TXT, or MD files to the folder above, then refresh."}
+              </div>
+            </PanelSectionRow>
+          ) : null}
           {pdfs.length > 0 ? (
             <PanelSectionRow>
               <div style={styles.fileList}>

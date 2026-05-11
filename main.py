@@ -23,7 +23,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Steamdeck"
 )
-PLUGIN_VERSION = "0.1.28"
+PLUGIN_VERSION = "0.1.29"
 AUTHOR_SIGNATURE = (
     "SES Bringer of Destruction, delivering democracy one orbital strike at a time."
 )

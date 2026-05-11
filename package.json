@@ -1,6 +1,6 @@
 {
   "name": "decky-pdf-viewer",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "description": "A Decky Loader Quick Access Menu reader for Steam Deck strategy guides.",
   "type": "module",
   "packageManager": "pnpm@9.15.9",
