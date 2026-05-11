@@ -1,103 +1,116 @@
-# Decky Plugin Template [![Chat](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://deckbrew.xyz/discord)
+# PDF Viewer for Decky Loader
 
-Reference example for using [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) (@decky/ui) in a [decky-loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin.
+PDF Viewer is a Decky Loader plugin for reading strategy guides from the Steam Deck Quick Access Menu while a game is running.
 
-### **Please also refer to the [wiki](https://wiki.deckbrew.xyz/en/user-guide/home#plugin-development) for important information on plugin development and submissions/updates. currently documentation is split between this README and the wiki which is something we are hoping to rectify in the future.**  
+Repository: https://github.com/IANmO0ne/pdf-viewer
 
-## Developers
+## V1 Features
 
-### Dependencies
+- Lists `.pdf`, `.epub`, `.txt`, and `.md` files directly from `/home/deck/Documents/PDF Steamdeck`
+- Uses bounded, non-recursive folder scans so a large or unreadable directory cannot leave the Decky panel stuck on loading forever
+- Filters the file list by name or type
+- Starts the backend with no filesystem or HTTP-server work until the reader needs it
+- Opens one PDF page at a time for predictable Steam Deck overlay performance
+- Opens EPUB and text files in a lightweight readable text view
+- Supports page back/forward, home, zoom in/out up to 800%, panning, bookmarks, and bookmark navigation
+- Shows a table of contents for PDFs with document outlines, plus page jump controls for PDFs without outlines
+- Adds a native Poppler/MuPDF page-render fallback for PDFs that show square glyph blocks in PDF.js
+- Shows clear warnings for password-protected, malformed, or previously failed files
+- Reopens the last active file after the Quick Access Menu closes; pressing Home clears that active file
+- Includes a clear zoom button step setting so users can choose how much the zoom buttons move at high zoom levels
+- Remembers the last page and zoom per PDF
+- Stores settings and state in Decky's plugin settings directory
+- Logs backend and frontend errors with timestamps through Decky's plugin logger
+- Serves PDFs locally from `127.0.0.1` with token-protected URLs and HTTP Range support for PDF.js
 
-This template relies on the user having Node.js v16.14+ and `pnpm` (v9) installed on their system.  
-Please make sure to install pnpm v9 to prevent issues with CI during plugin submission.  
-`pnpm` can be downloaded from `npm` itself which is recommended.
+## Steam Deck Install For Testing
 
-#### Linux
+1. Put your guides in `/home/deck/Documents/PDF Steamdeck`.
+   Files must be directly inside this folder for the current build. Subfolder scanning is disabled to keep refreshes quick in Gaming Mode.
+2. Build the plugin from this repository:
 
-```bash
-sudo npm i -g pnpm@9
+   ```sh
+   corepack prepare pnpm@9.15.9 --activate
+   corepack pnpm install
+   corepack pnpm run package
+   ```
+
+3. Copy `out/decky-pdf-viewer.zip` to your Steam Deck.
+4. Enable Decky Loader developer mode and install the zip as a local plugin.
+5. Open the Quick Access Menu, choose `PDF Viewer`, refresh the PDF list, and select a guide.
+
+If Decky still shows a `Failed to fetch dynamically imported module` error after installing a new zip, uninstall the old local plugin first or remove stale plugin folders from `/home/deck/homebrew/plugins/`, then reinstall the current zip and reboot Gaming Mode.
+
+If a PDF page opens but text appears as square blocks, open the settings gear while viewing that PDF and turn on `Native page render`. This uses a SteamOS system renderer when available. It is slower than the normal renderer, but it can handle PDFs whose embedded font mappings confuse PDF.js.
+
+The GitHub release flow is the intended publish path once Steam Deck testing confirms the plugin behaves well in Gaming Mode. Upload `out/decky-pdf-viewer.zip` to a release, then download and install that zip on the Deck.
+
+The test zip intentionally omits source maps and extra docs so Decky's local installer has less work to parse in Gaming Mode.
+
+Author signature: SES Bringer of Destruction, delivering democracy one orbital strike at a time.
+
+### Direct Copy Notes
+
+For early testing, the release zip is safer than copying raw source because it matches Decky's distribution layout. If direct SSH deployment is added later, it should copy the packaged plugin directory from `out/decky-pdf-viewer/` into `/home/deck/homebrew/plugins/decky-pdf-viewer`.
+
+## Development
+
+```sh
+corepack prepare pnpm@9.15.9 --activate
+corepack pnpm install
+corepack pnpm run check
+corepack pnpm run build
+python -m pytest
 ```
 
-If you would like to build plugins that have their own custom backends, Docker is required as it is used by the Decky CLI tool.
+If `pytest` is not installed on the development machine, run:
 
-### Making your own plugin
-
-1. You can fork this repo or utilize the "Use this template" button on Github.
-2. In your local fork/own plugin-repository run these commands:
-   1. ``pnpm i``
-   2. ``pnpm run build``
-   - These setup pnpm and build the frontend code for testing.
-3. Consult the [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) repository for ways to accomplish your tasks.
-   - Documentation and examples are still rough, 
-   - Decky loader primarily targets Steam Deck hardware so keep this in mind when developing your plugin.
-4. If using VSCodium/VSCode, run the `setup` and `build` and `deploy` tasks. If not using VSCodium etc. you can derive your own makefile or just manually utilize the scripts for these commands as you see fit.
-
-If you use VSCode or it's derivatives (we suggest [VSCodium](https://vscodium.com/)!) just run the `setup` and `build` tasks. It's really that simple.
-
-#### Other important information
-
-Everytime you change the frontend code (`index.tsx` etc) you will need to rebuild using the commands from step 2 above or the build task if you're using vscode or a derivative.
-
-Note: If you are receiving build errors due to an out of date library, you should run this command inside of your repository:
-
-```bash
-pnpm update @decky/ui --latest
+```sh
+python -m pip install -r requirements-dev.txt
 ```
 
-### Backend support
+## Dependency And Release Transparency
 
-If you are developing with a backend for a plugin and would like to submit it to the [decky-plugin-database](https://github.com/SteamDeckHomebrew/decky-plugin-database) you will need to have all backend code located in ``backend/src``, with backend being located in the root of your git repository.
-When building your plugin, the source code will be built and any finished binary or binaries will be output to ``backend/out`` (which is created during CI.)
-If your buildscript, makefile or any other build method does not place the binary files in the ``backend/out`` directory they will not be properly picked up during CI and your plugin will not have the required binaries included for distribution.
+The release zip is generated from this public repository with:
 
-Example:  
-In our makefile used to demonstrate the CI process of building and distributing a plugin backend, note that the makefile explicitly creates the `out` folder (``backend/out``) and then compiles the binary into that folder. Here's the relevant snippet.
-
-```make
-hello:
-	mkdir -p ./out
-	gcc -o ./out/hello ./src/main.c
+```sh
+corepack pnpm run package
 ```
 
-The CI does create the `out` folder itself but we recommend creating it yourself if possible during your build process to ensure the build process goes smoothly.
+The zip contains only the Decky plugin files needed at runtime:
 
-Note: When locally building your plugin it will be placed into a folder called 'out' this is different from the concept described above.
+- `plugin.json`
+- `package.json`
+- `main.py`
+- `LICENSE`
+- `dist/index.js`
+- `dist/pdf.worker.min.js`
+- `dist/standard_fonts/`
+- `dist/cmaps/`
 
-The out folder is not sent to the final plugin, but is then put into a ``bin`` folder which is found at the root of the plugin's directory.  
-More information on the bin folder can be found below in the distribution section below.
+PDF rendering uses Mozilla PDF.js through the pinned `pdfjs-dist` package in `package.json`. During `rollup -c`, the build copies the PDF.js worker, standard fonts, and CMaps from `node_modules/pdfjs-dist` into `dist/` so the plugin can render PDFs without downloading code or assets at runtime.
 
-### Distribution
+EPUB and text support are implemented in the Python backend with the Python standard library. The plugin does not bundle native binaries and does not require root. If a user enables `Native page render`, the backend only calls SteamOS/system PDF tools that are already present on the device, such as `pdftoppm`, `pdftocairo`, or `mutool`.
 
-We recommend following the instructions found in the [decky-plugin-database](https://github.com/SteamDeckHomebrew/decky-plugin-database) on how to get your plugin up on the plugin store. This is the best way to get your plugin in front of users.
-You can also choose to do distribution via a zip file containing the needed files, if that zip file is uploaded to a URL it can then be downloaded and installed via decky-loader.
+Main third-party runtime dependencies:
 
-**NOTE: We do not currently have a method to install from a downloaded zip file in "game-mode" due to lack of a usable file-picking dialog.**
+- `@decky/api` and `@decky/ui` for Decky plugin integration and UI
+- `pdfjs-dist` for PDF parsing and rendering
+- `react-icons` for toolbar icons
+- `tslib` for TypeScript helper output
 
-Layout of a plugin zip ready for distribution:
-```
-pluginname-v1.0.0.zip (version number is optional but recommended for users sake)
-   |
-   pluginname/ <directory>
-   |  |  |
-   |  |  bin/ <directory> (optional)
-   |  |     |
-   |  |     binary (optional)
-   |  |
-   |  dist/ <directory> [required]
-   |      |
-   |      index.js [required]
-   | 
-   package.json [required]
-   plugin.json [required]
-   main.py {required if you are using the python backend of decky-loader: serverAPI}
-   README.md (optional but recommended)
-   LICENSE(.md) [required, filename should be roughly similar, suffix not needed]
-```
+Development and packaging dependencies are declared in `package.json` and are not copied into the release zip except for the PDF.js runtime assets listed above.
 
-Note regarding licenses: Including a license is required for the plugin store if your chosen license requires the license to be included alongside usage of source-code/binaries!
+The plugin intentionally ships with single-page PDF rendering. Continuous scroll and search are future features because large strategy guides can be expensive to render inside the Decky side panel.
 
-Standard procedure for licenses is to have your chosen license at the top of the file, and to leave the original license for the plugin-template at the bottom. If this is not the case on submission to the plugin database, you will be asked to fix this discrepancy.
+If Decky cannot load `dist/pdf.worker.min.js` on the Steam Deck, the previous project's blob-worker approach can be added as a fallback. That is intentionally deferred until real Deck testing shows it is needed.
 
-We cannot and will not distribute your plugin on the Plugin Store if it's license requires it's inclusion but you have not included a license to be re-distributed with your plugin in the root of your git repository.
-# pdf-viewer
-# pdf-viewer
+## Logs And State
+
+Decky provides the runtime paths at plugin launch:
+
+- Settings: `DECKY_PLUGIN_SETTINGS_DIR/settings.json`
+- Per-PDF state: `DECKY_PLUGIN_SETTINGS_DIR/state.json`
+- Logs: `DECKY_PLUGIN_LOG`
+
+For bug reports, include the Decky plugin log and the name of the file that failed.

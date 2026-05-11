@@ -1,6 +1,11 @@
 {
   "name": "PDF Viewer",
-  "author": "LasOneOneThe_Moon",
+  "author": "IANmO0ne",
+  "flags": [],
   "api_version": 1,
-  "flags": ["debug"]
+  "publish": {
+    "tags": ["pdf", "reader", "utility"],
+    "description": "Read PDF, EPUB, TXT, and Markdown strategy guides from the Decky Quick Access Menu while playing on Steam Deck.",
+    "image": "https://raw.githubusercontent.com/SteamDeckHomebrew/decky-plugin-template/main/assets/logo.png"
+  }
 }
