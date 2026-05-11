@@ -5,6 +5,7 @@ import {
   PanelSection,
   PanelSectionRow,
   SliderField,
+  TextField,
   staticClasses
 } from "@decky/ui";
 import { call, definePlugin, toaster } from "@decky/api";
@@ -15,6 +16,7 @@ import {
   FaArrowRight,
   FaBookmark,
   FaCog,
+  FaExclamationTriangle,
   FaFileAlt,
   FaBookOpen,
   FaFilePdf,
@@ -112,6 +114,14 @@ interface ActiveReaderSession {
   updatedAt: string;
 }
 
+interface FailedFileRecord {
+  name: string;
+  message: string;
+  updatedAt: string;
+}
+
+type FailedFileMap = Record<string, FailedFileRecord>;
+
 interface PdfViewport {
   width: number;
   height: number;
@@ -200,6 +210,7 @@ const logFrontendEvent = (
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const ACTIVE_SESSION_STORAGE_KEY = "decky-pdf-viewer.activeReaderSession";
+const FAILED_FILES_STORAGE_KEY = "decky-pdf-viewer.failedFiles";
 const ZOOM_STEP_STORAGE_KEY = "decky-pdf-viewer.zoomStep";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 8;
@@ -209,7 +220,7 @@ const MAX_TOC_ITEMS = 300;
 const MAX_FULL_PDF_FALLBACK_BYTES = 128 * 1024 * 1024;
 const MAX_STRUCTURAL_REPAIR_FALLBACK_BYTES = 512 * 1024 * 1024;
 const DEFAULT_SETTINGS: Settings = {
-  pdfFolder: "/home/deck/Documents/PDF Seamdeck",
+  pdfFolder: "/home/deck/Documents/PDF Steamdeck",
   viewMode: "single",
   fitMode: "width",
   zoomStep: 0.25
@@ -429,6 +440,40 @@ function clearActiveReaderSession(): void {
   removeStorage(ACTIVE_SESSION_STORAGE_KEY);
 }
 
+function loadFailedFiles(): FailedFileMap {
+  const rawValue = readStorage(FAILED_FILES_STORAGE_KEY);
+  if (!rawValue) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as FailedFileMap;
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([, record]) => {
+          return (
+            record &&
+            typeof record.name === "string" &&
+            typeof record.message === "string" &&
+            typeof record.updatedAt === "string"
+          );
+        })
+        .slice(-100)
+    );
+  } catch {
+    removeStorage(FAILED_FILES_STORAGE_KEY);
+    return {};
+  }
+}
+
+function saveFailedFiles(records: FailedFileMap): void {
+  writeStorage(FAILED_FILES_STORAGE_KEY, JSON.stringify(records));
+}
+
 function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 B";
@@ -466,6 +511,16 @@ function isPdfIntegrityMessage(message: string): boolean {
     detail.includes("catalog") ||
     detail.includes("corrupt") ||
     detail.includes("damaged")
+  );
+}
+
+function isPasswordProtectedPdfMessage(message: string): boolean {
+  const detail = message.toLowerCase();
+  return (
+    detail.includes("password") ||
+    detail.includes("encrypted") ||
+    detail.includes("needpassword") ||
+    detail.includes("incorrect password")
   );
 }
 
@@ -715,6 +770,8 @@ function Content() {
   const [tocItems, setTocItems] = useState<TocItem[]>([]);
   const [tocStatus, setTocStatus] = useState("");
   const [jumpPage, setJumpPage] = useState(1);
+  const [fileFilter, setFileFilter] = useState("");
+  const [failedFiles, setFailedFiles] = useState<FailedFileMap>(loadFailedFiles);
   const [busyMessage, setBusyMessage] = useState("Loading PDF folder...");
   const [errorMessage, setErrorMessage] = useState("");
   const [renderMessage, setRenderMessage] = useState("");
@@ -753,6 +810,36 @@ function Content() {
     },
     []
   );
+
+  const updateFailedFile = useCallback(
+    (file: PdfEntry, message: string) => {
+      setFailedFiles((currentRecords) => {
+        const nextRecords = {
+          ...currentRecords,
+          [file.id]: {
+            name: file.name,
+            message,
+            updatedAt: new Date().toISOString()
+          }
+        };
+        saveFailedFiles(nextRecords);
+        return nextRecords;
+      });
+    },
+    []
+  );
+
+  const clearFailedFile = useCallback((fileId: string) => {
+    setFailedFiles((currentRecords) => {
+      if (!currentRecords[fileId]) {
+        return currentRecords;
+      }
+      const nextRecords = { ...currentRecords };
+      delete nextRecords[fileId];
+      saveFailedFiles(nextRecords);
+      return nextRecords;
+    });
+  }, []);
 
   const loadLibrary = useCallback(async () => {
     setBusyMessage("Connecting to PDF Viewer...");
@@ -858,6 +945,7 @@ function Content() {
           setTocItems([]);
           setTocStatus("");
           setJumpPage(1);
+          clearFailedFile(selectedPdf.id);
           setBusyMessage("");
           return;
         }
@@ -900,10 +988,18 @@ function Content() {
           clamp(reopenPosition?.zoom || sessionPosition?.zoom || state.zoom || 1, MIN_ZOOM, MAX_ZOOM)
         );
         setBookmarks(state.bookmarks || []);
+        clearFailedFile(selectedPdf.id);
         setBusyMessage("");
       } catch (error) {
         setBusyMessage("");
-        await reportError("Unable to open the PDF", error, {
+        const failureDetail = describeError(error);
+        updateFailedFile(selectedPdf, failureDetail);
+        const openErrorTitle = isPasswordProtectedPdfMessage(failureDetail)
+          ? "Unable to open password-protected PDF"
+          : selectedPdf.kind === "pdf"
+            ? "Unable to open the PDF"
+            : "Unable to open the file";
+        await reportError(openErrorTitle, error, {
           pdfId: selectedPdf.id,
           pdfName: selectedPdf.name
         });
@@ -917,7 +1013,7 @@ function Content() {
       activeRenderRef.current?.cancel();
       void openedDoc?.destroy?.();
     };
-  }, [reportError, selectedPdf, useCompatibilityRenderer]);
+  }, [clearFailedFile, reportError, selectedPdf, updateFailedFile, useCompatibilityRenderer]);
 
   useEffect(() => {
     if (!selectedPdf || !pdfDoc || selectedPdf.kind !== "pdf") {
@@ -1075,6 +1171,9 @@ function Content() {
         }
 
         setRenderMessage("");
+        if (selectedPdf) {
+          updateFailedFile(selectedPdf, describeError(error));
+        }
         await reportError("Unable to render this page", error, {
           pdfId: selectedPdf?.id,
           page: pageNumber,
@@ -1093,8 +1192,8 @@ function Content() {
     pageNumber,
     pdfDoc,
     reportError,
-    selectedPdf?.id,
-    selectedPdf?.kind,
+    selectedPdf,
+    updateFailedFile,
     useCompatibilityRenderer,
     useNativeRenderer,
     zoom
@@ -1134,6 +1233,7 @@ function Content() {
           return;
         }
         setRenderMessage("");
+        updateFailedFile(selectedPdf, describeError(error));
         await reportError("Unable to render this page with the native renderer", error, {
           pdfId: selectedPdf.id,
           page: pageNumber,
@@ -1147,11 +1247,18 @@ function Content() {
     return () => {
       cancelled = true;
     };
-  }, [pageNumber, pdfDoc, reportError, selectedPdf, useNativeRenderer, zoom]);
+  }, [pageNumber, pdfDoc, reportError, selectedPdf, updateFailedFile, useNativeRenderer, zoom]);
 
   const currentFolder = settings.pdfFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
-  const visibleFiles = pdfs.slice(0, 150);
+  const normalizedFileFilter = fileFilter.trim().toLowerCase();
+  const filteredFiles = normalizedFileFilter
+    ? pdfs.filter((file) => {
+        const searchableText = `${file.name} ${file.relativePath} ${fileKindLabel(file.kind)}`;
+        return searchableText.toLowerCase().includes(normalizedFileFilter);
+      })
+    : pdfs;
+  const visibleFiles = filteredFiles.slice(0, 150);
   const backendIsConnected = Boolean(pluginStatus);
   const nativeRendererLabel = nativeRenderStatus
     ? nativeRenderStatus.available
@@ -1160,6 +1267,10 @@ function Content() {
     : "unknown";
   const showPdfIntegrityHint =
     selectedPdf?.kind === "pdf" && errorMessage && isPdfIntegrityMessage(errorMessage);
+  const showPasswordProtectedHint =
+    selectedPdf?.kind === "pdf" &&
+    errorMessage &&
+    isPasswordProtectedPdfMessage(errorMessage);
 
   const selectPdf = useCallback((pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
@@ -1377,6 +1488,12 @@ function Content() {
               if it opens elsewhere.
             </div>
           ) : null}
+          {showPasswordProtectedHint ? (
+            <div style={{ marginTop: "6px" }}>
+              This PDF appears to be password-protected or encrypted. Unlock it in another
+              PDF reader, export an unprotected copy, then add that copy to the PDF folder.
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -1393,20 +1510,36 @@ function Content() {
           {pdfs.length > 0 ? (
             <PanelSectionRow>
               <div style={styles.fileList}>
+                <TextField
+                  label="Search files"
+                  value={fileFilter}
+                  bShowClearAction
+                  onChange={(event) => setFileFilter(event.currentTarget.value)}
+                />
                 <div style={styles.smallText}>
-                  Showing {visibleFiles.length} of {pdfs.length} supported files.
+                  Showing {visibleFiles.length} of {filteredFiles.length} matching files
+                  from {pdfs.length} supported files.
                 </div>
-                {visibleFiles.map((file) => (
-                  <ButtonItem
-                    key={file.id}
-                    layout="below"
-                    icon={fileIcon(file.kind)}
-                    description={`${fileKindLabel(file.kind)} · ${formatBytes(file.sizeBytes)} · ${file.relativePath}`}
-                    onClick={() => selectPdf(file.id)}
-                  >
-                    {file.name}
-                  </ButtonItem>
-                ))}
+                {visibleFiles.length === 0 ? (
+                  <div style={styles.smallText}>No files match this search.</div>
+                ) : null}
+                {visibleFiles.map((file) => {
+                  const failedFile = failedFiles[file.id];
+                  const description = `${fileKindLabel(file.kind)} · ${formatBytes(file.sizeBytes)} · ${file.relativePath}${
+                    failedFile ? ` · Warning: last open failed (${failedFile.message})` : ""
+                  }`;
+                  return (
+                    <ButtonItem
+                      key={file.id}
+                      layout="below"
+                      icon={failedFile ? <FaExclamationTriangle /> : fileIcon(file.kind)}
+                      description={description}
+                      onClick={() => selectPdf(file.id)}
+                    >
+                      {file.name}
+                    </ButtonItem>
+                  );
+                })}
               </div>
             </PanelSectionRow>
           ) : null}

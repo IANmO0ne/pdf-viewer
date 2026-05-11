@@ -21,9 +21,16 @@ import decky
 
 
 DEFAULT_PDF_FOLDER = os.environ.get(
-    "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
+    "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Steamdeck"
 )
-PLUGIN_VERSION = "0.1.26"
+LEGACY_PDF_FOLDERS = tuple(
+    folder
+    for folder in os.environ.get(
+        "PDF_VIEWER_LEGACY_FOLDERS", "/home/deck/Documents/PDF Seamdeck"
+    ).split(os.pathsep)
+    if folder
+)
+PLUGIN_VERSION = "0.1.27"
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
 MIN_ZOOM = 0.5
@@ -148,6 +155,7 @@ class Plugin:
                 "Library folder scanned",
                 {
                     "folder": self._settings["pdfFolder"],
+                    "folders": [str(folder) for folder in self._candidate_library_folders()],
                     "count": len(entries),
                     "recursive": False,
                 },
@@ -434,20 +442,22 @@ class Plugin:
 
     def _get_library_diagnostics_sync(self) -> dict[str, Any]:
         active_folder = Path(self._settings["pdfFolder"]).expanduser()
+        candidate_folders = self._candidate_library_folders()
         return {
             "activeFolder": str(active_folder),
             "activeExists": active_folder.exists(),
             "supportedExtensions": sorted(SUPPORTED_EXTENSIONS.keys()),
             "candidates": [
                 {
-                    "folder": str(active_folder),
-                    "exists": active_folder.exists(),
+                    "folder": str(folder),
+                    "exists": folder.exists(),
                     "supportedCount": self._count_supported_files(
-                        active_folder,
+                        folder,
                         file_limit=QUICK_SCAN_FILES,
                         seconds=1.0,
                     ),
                 }
+                for folder in candidate_folders
             ],
         }
 
@@ -504,6 +514,23 @@ class Plugin:
         folder = self._settings.get("pdfFolder") or DEFAULT_PDF_FOLDER
         path = Path(folder).expanduser()
         path.mkdir(parents=True, exist_ok=True)
+
+    def _candidate_library_folders(self) -> list[Path]:
+        active_folder = Path(self._settings.get("pdfFolder") or DEFAULT_PDF_FOLDER)
+        active_folder = active_folder.expanduser().absolute()
+        folders = [active_folder]
+        seen = {str(active_folder)}
+
+        for legacy_folder in LEGACY_PDF_FOLDERS:
+            candidate = Path(legacy_folder).expanduser().absolute()
+            candidate_key = str(candidate)
+            if candidate_key in seen:
+                continue
+            if candidate.exists() and candidate.is_dir():
+                folders.append(candidate)
+                seen.add(candidate_key)
+
+        return folders
 
     def _read_json(self, path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
         if not path.exists():
@@ -666,10 +693,12 @@ class Plugin:
             return
 
     def _refresh_file_index(self) -> list[dict[str, Any]]:
-        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
+        folders = self._candidate_library_folders()
+        primary_folder = folders[0]
         self._last_scan = {
             "status": "running",
-            "folder": str(folder),
+            "folder": str(primary_folder),
+            "folders": [str(folder) for folder in folders],
             "count": 0,
             "elapsedMs": 0,
             "error": "",
@@ -677,12 +706,13 @@ class Plugin:
 
         started = time.monotonic()
         try:
-            entries, index = self._scan_supported_files_for_folder(folder)
+            entries, index = self._scan_supported_files_for_folders(folders)
         except Exception as error:
             elapsed_ms = round((time.monotonic() - started) * 1000)
             self._last_scan = {
                 "status": "error",
-                "folder": str(folder),
+                "folder": str(primary_folder),
+                "folders": [str(folder) for folder in folders],
                 "count": 0,
                 "elapsedMs": elapsed_ms,
                 "error": str(error),
@@ -695,7 +725,8 @@ class Plugin:
         self._file_index = index
         self._last_scan = {
             "status": "ok",
-            "folder": str(folder),
+            "folder": str(primary_folder),
+            "folders": [str(folder) for folder in folders],
             "count": len(entries),
             "elapsedMs": elapsed_ms,
             "error": "",
@@ -703,23 +734,46 @@ class Plugin:
         return entries
 
     def _scan_supported_files(self) -> list[dict[str, Any]]:
-        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
-        entries, index = self._scan_supported_files_for_folder(folder)
+        folders = self._candidate_library_folders()
+        entries, index = self._scan_supported_files_for_folders(folders)
         self._file_index = index
         self._last_scan = {
             "status": "ok",
-            "folder": str(folder),
+            "folder": str(folders[0]),
+            "folders": [str(folder) for folder in folders],
             "count": len(entries),
             "elapsedMs": 0,
             "error": "",
         }
         return entries
 
+    def _scan_supported_files_for_folders(
+        self,
+        folders: list[Path],
+    ) -> tuple[list[dict[str, Any]], dict[str, Path]]:
+        entries: list[dict[str, Any]] = []
+        index: dict[str, Path] = {}
+
+        for folder_index, folder in enumerate(folders):
+            folder_entries, folder_index_map = self._scan_supported_files_for_folder(
+                folder,
+                create=folder_index == 0,
+            )
+            entries.extend(folder_entries)
+            index.update(folder_index_map)
+
+        entries.sort(key=lambda entry: entry["relativePath"].casefold())
+        return entries, index
+
     def _scan_supported_files_for_folder(
         self,
         folder: Path,
+        create: bool = True,
     ) -> tuple[list[dict[str, Any]], dict[str, Path]]:
-        folder.mkdir(parents=True, exist_ok=True)
+        if create:
+            folder.mkdir(parents=True, exist_ok=True)
+        elif not folder.exists() or not folder.is_dir():
+            return [], {}
 
         entries: list[dict[str, Any]] = []
         index: dict[str, Path] = {}

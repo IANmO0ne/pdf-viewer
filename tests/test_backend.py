@@ -39,7 +39,8 @@ def plugin_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
 
     monkeypatch.setitem(sys.modules, "decky", fake_decky)
-    monkeypatch.setenv("PDF_VIEWER_DEFAULT_FOLDER", str(tmp_path / "PDF Seamdeck"))
+    monkeypatch.setenv("PDF_VIEWER_DEFAULT_FOLDER", str(tmp_path / "PDF Steamdeck"))
+    monkeypatch.setenv("PDF_VIEWER_LEGACY_FOLDERS", str(tmp_path / "PDF Seamdeck"))
     sys.modules.pop("main", None)
 
     root = Path(__file__).resolve().parents[1]
@@ -87,28 +88,31 @@ def test_default_folder_is_created_and_supported_listing_is_fast_non_recursive(p
     assert entries[0]["sizeBytes"] > 0
 
 
-def test_diagnostics_only_reports_default_folder(plugin_module):
+def test_diagnostics_reports_default_and_legacy_folder(plugin_module):
     module, _logger = plugin_module
     plugin = module.Plugin()
 
     async def exercise():
         default_folder = Path(module.DEFAULT_PDF_FOLDER)
-        alternate_folder = default_folder.parent / "PDF Steamdeck"
-        alternate_folder.mkdir(parents=True)
-        (alternate_folder / "guide.pdf").write_bytes(b"%PDF-1.7\n")
+        legacy_folder = default_folder.parent / "PDF Seamdeck"
+        legacy_folder.mkdir(parents=True)
+        (legacy_folder / "legacy-guide.pdf").write_bytes(b"%PDF-1.7\n")
 
         await plugin._main()
         settings = await plugin.get_settings()
         diagnostics = await plugin.get_library_diagnostics()
+        entries = await plugin.list_pdfs()
         await plugin._unload()
-        return settings, diagnostics
+        return settings, diagnostics, entries
 
-    settings, diagnostics = run(exercise())
-    assert Path(settings["pdfFolder"]).name == "PDF Seamdeck"
+    settings, diagnostics, entries = run(exercise())
+    assert Path(settings["pdfFolder"]).name == "PDF Steamdeck"
     assert diagnostics["activeFolder"] == settings["pdfFolder"]
     assert [Path(candidate["folder"]).name for candidate in diagnostics["candidates"]] == [
-        "PDF Seamdeck"
+        "PDF Steamdeck",
+        "PDF Seamdeck",
     ]
+    assert [entry["name"] for entry in entries] == ["legacy-guide.pdf"]
 
 
 def test_settings_always_use_default_pdf_folder(plugin_module):
@@ -174,7 +178,8 @@ def test_backend_initializes_from_environment_when_decky_constants_are_missing(
     monkeypatch.setenv("DECKY_PLUGIN_SETTINGS_DIR", str(tmp_path / "settings-from-env"))
     monkeypatch.setenv("DECKY_PLUGIN_RUNTIME_DIR", str(tmp_path / "runtime-from-env"))
     monkeypatch.setenv("DECKY_PLUGIN_LOG_DIR", str(tmp_path / "logs-from-env"))
-    monkeypatch.setenv("PDF_VIEWER_DEFAULT_FOLDER", str(tmp_path / "PDF Seamdeck"))
+    monkeypatch.setenv("PDF_VIEWER_DEFAULT_FOLDER", str(tmp_path / "PDF Steamdeck"))
+    monkeypatch.setenv("PDF_VIEWER_LEGACY_FOLDERS", str(tmp_path / "PDF Seamdeck"))
     sys.modules.pop("main", None)
 
     root = Path(__file__).resolve().parents[1]

@@ -6,18 +6,18 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 
 ## V1 Features
 
-- Lists `.pdf`, `.epub`, `.txt`, and `.md` files directly from `/home/deck/Documents/PDF Seamdeck`
-- Shows quick diagnostics for common alternate folder names and guide folders under `/home/deck/Documents` when the configured folder is empty
+- Lists `.pdf`, `.epub`, `.txt`, and `.md` files directly from `/home/deck/Documents/PDF Steamdeck`
+- Keeps a legacy fallback for `/home/deck/Documents/PDF Seamdeck` so early test installs do not lose their library after updating
 - Uses bounded, non-recursive folder scans so a large or unreadable directory cannot leave the Decky panel stuck on loading forever
-- Shows a Debug panel after scan failures with the active folder, last backend scan status, and a quick folder probe
-- Keeps build and backend diagnostics available through logs and status calls without cluttering the normal reader UI
-- Provides separate backend-only, folder-only, and library-refresh checks to isolate Decky RPC problems from filesystem problems
-- Starts the backend in safe mode with no filesystem or HTTP-server work until a specific button needs it
+- Filters the file list by name or type
+- Keeps backend diagnostics available through logs and status calls without cluttering the normal reader UI
+- Starts the backend in safe mode with no filesystem or HTTP-server work until the reader needs it
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out up to 800%, panning, bookmarks, and bookmark navigation
 - Shows a table of contents for PDFs with document outlines, plus page jump controls for PDFs without outlines
 - Adds a native Poppler/MuPDF page-render fallback for PDFs that show square glyph blocks in PDF.js
+- Shows clear warnings for password-protected, malformed, or previously failed files
 - Reopens the last active file after the Quick Access Menu closes; pressing Home clears that active file
 - Includes a clear zoom button step setting so users can choose how much the zoom buttons move at high zoom levels
 - Remembers the last page and zoom per PDF
@@ -27,9 +27,9 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 
 ## Steam Deck Install For Testing
 
-1. Put your guides in `/home/deck/Documents/PDF Seamdeck`.
+1. Put your guides in `/home/deck/Documents/PDF Steamdeck`.
    Files must be directly inside this folder for the current build. Subfolder scanning is disabled to keep refreshes quick in Gaming Mode.
-   If you already made a similar folder such as `/home/deck/Documents/PDF Steamdeck`, the empty-library screen shows which folders were checked and how many supported files were found.
+   The old test folder `/home/deck/Documents/PDF Seamdeck` is still scanned as a fallback, but new installs should use `PDF Steamdeck`.
 2. Build the plugin from this repository:
 
    ```sh
@@ -82,4 +82,4 @@ Decky provides the runtime paths at plugin launch:
 - Per-PDF state: `DECKY_PLUGIN_SETTINGS_DIR/state.json`
 - Logs: `DECKY_PLUGIN_LOG`
 
-The settings view inside the plugin shows the active log path so test failures can be copied back into an issue.
+For bug reports, include the Decky plugin log and the name of the file that failed.
