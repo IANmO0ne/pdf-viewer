@@ -23,7 +23,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
-PLUGIN_VERSION = "0.1.22"
+PLUGIN_VERSION = "0.1.23"
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
 MIN_ZOOM = 0.5
@@ -176,17 +176,17 @@ class Plugin:
             }
 
     async def get_native_render_status(self) -> dict[str, Any]:
-        executable = self._find_executable("pdftoppm")
+        renderer = self._select_native_renderer()
         return {
             "version": PLUGIN_VERSION,
             "timestamp": utc_now(),
-            "available": executable is not None,
-            "renderer": "pdftoppm" if executable else "",
-            "executable": executable or "",
+            "available": renderer is not None,
+            "renderer": renderer[0] if renderer else "",
+            "executable": renderer[1] if renderer else "",
             "message": (
-                "Native Poppler renderer is available"
-                if executable
-                else "Native Poppler renderer was not found on this Steam Deck"
+                f"Native renderer {renderer[0]} is available"
+                if renderer
+                else "Native PDF renderer was not found on this Steam Deck"
             ),
         }
 
@@ -208,12 +208,13 @@ class Plugin:
             pdf_path = path.resolve()
             await self._start_http_server()
 
-        executable = self._find_executable("pdftoppm")
-        if executable is None:
+        renderer = self._select_native_renderer()
+        if renderer is None:
             raise RuntimeError(
                 "Native PDF renderer is not available on this Steam Deck. "
-                "Use normal rendering, or install/check Poppler outside the plugin."
+                "Use normal rendering, or install/check Poppler or MuPDF outside the plugin."
             )
+        renderer_name, executable = renderer
 
         page_number = max(1, int(page))
         render_width = max(
@@ -223,7 +224,7 @@ class Plugin:
         pdf_stat = pdf_path.stat()
         render_key = (
             f"{pdf_id}:{page_number}:{render_width}:"
-            f"{pdf_stat.st_size}:{int(pdf_stat.st_mtime)}:pdftoppm"
+            f"{pdf_stat.st_size}:{int(pdf_stat.st_mtime)}:{renderer_name}"
         )
         render_id = hashlib.sha256(render_key.encode("utf-8")).hexdigest()
         output_dir = self.runtime_dir / "native-render"
@@ -231,7 +232,8 @@ class Plugin:
 
         if not output_path.exists():
             output_dir.mkdir(parents=True, exist_ok=True)
-            await self._render_pdf_page_with_pdftoppm(
+            await self._render_pdf_page_native(
+                renderer=renderer_name,
                 executable=executable,
                 pdf_path=pdf_path,
                 output_path=output_path,
@@ -248,7 +250,7 @@ class Plugin:
                 f"http://127.0.0.1:{self._server_port}/render/{render_id}"
                 f"?token={self._token}"
             ),
-            "renderer": "pdftoppm",
+            "renderer": renderer_name,
             "page": page_number,
             "width": render_width,
             "sizeBytes": output_path.stat().st_size,
@@ -885,8 +887,16 @@ class Plugin:
 
         return None
 
-    async def _render_pdf_page_with_pdftoppm(
+    def _select_native_renderer(self) -> tuple[str, str] | None:
+        for renderer in ("pdftoppm", "pdftocairo", "mutool"):
+            executable = self._find_executable(renderer)
+            if executable:
+                return renderer, executable
+        return None
+
+    async def _render_pdf_page_native(
         self,
+        renderer: str,
         executable: str,
         pdf_path: Path,
         output_path: Path,
@@ -897,21 +907,37 @@ class Plugin:
             output_path.unlink()
 
         output_prefix = output_path.with_suffix("")
-        command = [
-            executable,
-            "-f",
-            str(page),
-            "-l",
-            str(page),
-            "-scale-to-x",
-            str(width),
-            "-scale-to-y",
-            "-1",
-            "-png",
-            "-singlefile",
-            str(pdf_path),
-            str(output_prefix),
-        ]
+        if renderer in {"pdftoppm", "pdftocairo"}:
+            command = [
+                executable,
+                "-f",
+                str(page),
+                "-l",
+                str(page),
+                "-scale-to-x",
+                str(width),
+                "-scale-to-y",
+                "-1",
+                "-png",
+                "-singlefile",
+                str(pdf_path),
+                str(output_prefix),
+            ]
+        elif renderer == "mutool":
+            command = [
+                executable,
+                "draw",
+                "-F",
+                "png",
+                "-o",
+                str(output_path),
+                "-w",
+                str(width),
+                str(pdf_path),
+                str(page),
+            ]
+        else:
+            raise RuntimeError(f"Unsupported native PDF renderer: {renderer}")
         started = time.monotonic()
         loop = asyncio.get_running_loop()
 
@@ -930,7 +956,13 @@ class Plugin:
             self._log(
                 "error",
                 "Native PDF render timed out",
-                {"pdf": pdf_path.name, "page": page, "width": width, "error": str(error)},
+                {
+                    "pdf": pdf_path.name,
+                    "page": page,
+                    "width": width,
+                    "renderer": renderer,
+                    "error": str(error),
+                },
             )
             raise RuntimeError(
                 "Native PDF renderer took too long. This PDF may be very large or damaged."
@@ -945,6 +977,7 @@ class Plugin:
                     "pdf": pdf_path.name,
                     "page": page,
                     "width": width,
+                    "renderer": renderer,
                     "returnCode": result.returncode,
                     "stdout": result.stdout[-1000:],
                     "stderr": result.stderr[-1000:],
@@ -963,6 +996,7 @@ class Plugin:
                 "pdf": pdf_path.name,
                 "page": page,
                 "width": width,
+                "renderer": renderer,
                 "sizeBytes": output_path.stat().st_size,
                 "elapsedMs": elapsed_ms,
             },

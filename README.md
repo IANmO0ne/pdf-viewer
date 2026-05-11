@@ -16,7 +16,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 - Opens one PDF page at a time for predictable Steam Deck overlay performance
 - Opens EPUB and text files in a lightweight readable text view
 - Supports page back/forward, home, zoom in/out, panning, bookmarks, and bookmark navigation
-- Adds a native Poppler page-render fallback for PDFs that show square glyph blocks in PDF.js
+- Adds a native Poppler/MuPDF page-render fallback for PDFs that show square glyph blocks in PDF.js
 - Remembers the last page and zoom per PDF
 - Stores settings and state in Decky's plugin settings directory
 - Logs backend and frontend errors with timestamps through Decky's plugin logger
@@ -41,7 +41,7 @@ Repository: https://github.com/IANmO0ne/pdf-viewer
 
 If Decky still shows a `Failed to fetch dynamically imported module` error after installing a new zip, uninstall the old local plugin first or remove stale plugin folders from `/home/deck/homebrew/plugins/`, then reinstall the current zip and reboot Gaming Mode.
 
-If a PDF page opens but text appears as square blocks, open the settings gear while viewing that PDF and turn on `Native page render`. This uses the Steam Deck's system Poppler renderer when available. It is slower than the normal renderer, but it can handle PDFs whose embedded font mappings confuse PDF.js.
+If a PDF page opens but text appears as square blocks, open the settings gear while viewing that PDF and turn on `Native page render`. This uses a SteamOS system renderer when available. It is slower than the normal renderer, but it can handle PDFs whose embedded font mappings confuse PDF.js.
 
 The GitHub release flow is the intended publish path once Steam Deck testing confirms the plugin behaves well in Gaming Mode. Upload `out/decky-pdf-viewer.zip` to a release, then download and install that zip on the Deck.
 
