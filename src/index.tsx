@@ -20,6 +20,7 @@ import {
   FaFilePdf,
   FaFont,
   FaHome,
+  FaImage,
   FaListUl,
   FaRegBookmark,
   FaSearchMinus,
@@ -52,6 +53,26 @@ interface PdfEntry {
 interface PdfAccess {
   id: string;
   url: string;
+  sizeBytes: number;
+}
+
+interface NativeRenderStatus {
+  version: string;
+  timestamp: string;
+  available: boolean;
+  renderer: string;
+  executable: string;
+  message: string;
+}
+
+interface NativePageRender {
+  version: string;
+  timestamp: string;
+  id: string;
+  url: string;
+  renderer: string;
+  page: number;
+  width: number;
   sizeBytes: number;
 }
 
@@ -121,6 +142,15 @@ const saveSettings = (settings: Partial<Settings>) =>
 const listPdfs = () => call<[], PdfEntry[]>("list_pdfs");
 const getPdfAccess = (pdfId: string) =>
   call<[string], PdfAccess>("get_pdf_access", pdfId);
+const getNativeRenderStatus = () =>
+  call<[], NativeRenderStatus>("get_native_render_status");
+const getNativePageRender = (pdfId: string, page: number, width: number) =>
+  call<[string, number, number], NativePageRender>(
+    "get_native_page_render",
+    pdfId,
+    page,
+    width
+  );
 const getTextContent = (fileId: string) =>
   call<[string], TextContent>("get_text_content", fileId);
 const getPdfState = (pdfId: string) => call<[string], PdfState>("get_pdf_state", pdfId);
@@ -140,7 +170,7 @@ const logFrontendEvent = (
     context
   );
 
-const FRONTEND_BUILD = "0.1.21";
+const FRONTEND_BUILD = "0.1.22";
 const BACKEND_LOG_COMMAND =
   'journalctl -u plugin_loader.service -n 300 --no-pager | grep -i -E "pdf|decky-pdf|python|traceback|error"';
 const MIN_ZOOM = 0.5;
@@ -173,7 +203,7 @@ const styles = {
   },
   toolbar: {
     display: "grid",
-    gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(9, minmax(0, 1fr))",
     gap: "6px",
     alignItems: "center"
   },
@@ -205,6 +235,12 @@ const styles = {
     padding: "6px"
   },
   canvas: {
+    display: "block",
+    margin: "0 auto",
+    background: "#f4f1e8",
+    boxShadow: "0 2px 10px rgba(0, 0, 0, 0.35)"
+  },
+  nativeImage: {
     display: "block",
     margin: "0 auto",
     background: "#f4f1e8",
@@ -477,6 +513,12 @@ function Content() {
   const [renderMessage, setRenderMessage] = useState("");
   const [pluginStatus, setPluginStatus] = useState<PluginStatus | null>(null);
   const [useCompatibilityRenderer, setUseCompatibilityRenderer] = useState(false);
+  const [useNativeRenderer, setUseNativeRenderer] = useState(false);
+  const [nativeRenderStatus, setNativeRenderStatus] = useState<NativeRenderStatus | null>(
+    null
+  );
+  const [nativePageImage, setNativePageImage] = useState<NativePageRender | null>(null);
+  const [nativeImageCssWidth, setNativeImageCssWidth] = useState(0);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -515,6 +557,14 @@ function Content() {
       );
       setPluginStatus(loadedStatus);
 
+      void withTimeout(
+        getNativeRenderStatus(),
+        2_000,
+        "Native render status check took longer than 2 seconds"
+      )
+        .then(setNativeRenderStatus)
+        .catch(() => setNativeRenderStatus(null));
+
       setBusyMessage("Loading PDF folder...");
       const loadedPdfs = await withTimeout(
         listPdfs(),
@@ -541,6 +591,7 @@ function Content() {
       setPageNumber(1);
       setBookmarks([]);
       setRenderMessage("");
+      setNativePageImage(null);
       return () => undefined;
     }
 
@@ -551,6 +602,7 @@ function Content() {
       setBusyMessage(`Opening ${selectedPdf.name}...`);
       setErrorMessage("");
       setRenderMessage("");
+      setNativePageImage(null);
       setPdfDoc(null);
       setTextContent("");
       setBookmarks([]);
@@ -646,7 +698,7 @@ function Content() {
   useEffect(() => {
     const canvas = canvasRef.current;
     const viewer = viewerRef.current;
-    if (!canvas || !viewer || !pdfDoc) {
+    if (!canvas || !viewer || !pdfDoc || useNativeRenderer || selectedPdf?.kind !== "pdf") {
       return () => undefined;
     }
 
@@ -738,19 +790,82 @@ function Content() {
       cancelled = true;
       activeRenderRef.current?.cancel();
     };
-  }, [pageNumber, pdfDoc, reportError, selectedPdf?.id, useCompatibilityRenderer, zoom]);
+  }, [
+    pageNumber,
+    pdfDoc,
+    reportError,
+    selectedPdf?.id,
+    selectedPdf?.kind,
+    useCompatibilityRenderer,
+    useNativeRenderer,
+    zoom
+  ]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !pdfDoc || !selectedPdf || selectedPdf.kind !== "pdf" || !useNativeRenderer) {
+      return () => undefined;
+    }
+
+    let cancelled = false;
+    const renderNativePage = async () => {
+      setNativePageImage(null);
+      setRenderMessage("Rendering page with native PDF renderer...");
+
+      const availableWidth = Math.max(240, viewer.clientWidth - 16);
+      const outputScale = Math.min(window.devicePixelRatio || 1, 2);
+      const cssWidth = Math.max(availableWidth, Math.floor(availableWidth * zoom));
+      const renderWidth = Math.floor(clamp(cssWidth * outputScale, 240, 1800));
+      setNativeImageCssWidth(Math.floor(renderWidth / outputScale));
+
+      try {
+        const image = await withTimeout(
+          getNativePageRender(selectedPdf.id, pageNumber, renderWidth),
+          60_000,
+          "Native PDF renderer took longer than 60 seconds"
+        );
+        if (!cancelled) {
+          setNativePageImage(image);
+          setRenderMessage("");
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setRenderMessage("");
+        await reportError("Unable to render this page with the native renderer", error, {
+          pdfId: selectedPdf.id,
+          page: pageNumber,
+          zoom
+        });
+      }
+    };
+
+    void renderNativePage();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pageNumber, pdfDoc, reportError, selectedPdf, useNativeRenderer, zoom]);
 
   const currentFolder = settings.pdfFolder;
   const isCurrentPageBookmarked = bookmarks.some((bookmark) => bookmark.page === pageNumber);
   const visibleFiles = pdfs.slice(0, 150);
   const backendVersion = pluginStatus?.version || "not connected";
   const backendIsConnected = Boolean(pluginStatus);
+  const nativeRendererLabel = nativeRenderStatus
+    ? nativeRenderStatus.available
+      ? `${nativeRenderStatus.renderer} available`
+      : "not available"
+    : "unknown";
   const showPdfIntegrityHint =
     selectedPdf?.kind === "pdf" && errorMessage && isPdfIntegrityMessage(errorMessage);
 
   const selectPdf = (pdfId: string) => {
     const pdf = pdfs.find((candidate) => candidate.id === pdfId) ?? null;
     setUseCompatibilityRenderer(false);
+    setUseNativeRenderer(false);
+    setNativePageImage(null);
     setSelectedPdf(pdf);
     setShowBookmarks(false);
     setShowSettings(false);
@@ -758,6 +873,8 @@ function Content() {
 
   const goHome = () => {
     setUseCompatibilityRenderer(false);
+    setUseNativeRenderer(false);
+    setNativePageImage(null);
     setSelectedPdf(null);
     setShowBookmarks(false);
     setShowSettings(false);
@@ -776,10 +893,45 @@ function Content() {
   const toggleFontRepair = () => {
     reopenPositionRef.current = { page: pageNumber, zoom };
     setErrorMessage("");
+    setNativePageImage(null);
     setRenderMessage(
       useCompatibilityRenderer ? "Reloading normal renderer..." : "Reloading font repair renderer..."
     );
     setUseCompatibilityRenderer((enabled) => !enabled);
+  };
+
+  const toggleNativeRenderer = async () => {
+    if (!selectedPdf || selectedPdf.kind !== "pdf") {
+      return;
+    }
+
+    if (useNativeRenderer) {
+      setUseNativeRenderer(false);
+      setNativePageImage(null);
+      setRenderMessage("Reloading normal renderer...");
+      return;
+    }
+
+    setErrorMessage("");
+    setRenderMessage("Checking native PDF renderer...");
+    try {
+      const status = await withTimeout(
+        getNativeRenderStatus(),
+        3_000,
+        "Native render status check took longer than 3 seconds"
+      );
+      setNativeRenderStatus(status);
+      if (!status.available) {
+        throw new Error(status.message || "Native PDF renderer is not available");
+      }
+      setUseNativeRenderer(true);
+      setRenderMessage("Switching to native page renderer...");
+    } catch (error) {
+      setRenderMessage("");
+      await reportError("Native PDF renderer is not available", error, {
+        pdfId: selectedPdf.id
+      });
+    }
   };
 
   const onToggleBookmark = async () => {
@@ -817,6 +969,7 @@ function Content() {
           <div style={styles.smallText}>
             <div>Frontend build: {FRONTEND_BUILD}</div>
             <div>Backend build: {backendVersion}</div>
+            <div>Native render: {nativeRendererLabel}</div>
             {pluginStatus ? <div>Backend RPC: ok at {pluginStatus.timestamp}</div> : null}
             {!backendIsConnected ? (
               <div>Waiting for Decky to start the Python backend.</div>
@@ -932,6 +1085,12 @@ function Content() {
                   onClick={toggleFontRepair}
                 />
                 <IconButton
+                  label="Native page render"
+                  icon={<FaImage />}
+                  disabled={selectedPdf.kind !== "pdf" || !pdfDoc}
+                  onClick={() => void toggleNativeRenderer()}
+                />
+                <IconButton
                   label="Settings"
                   icon={<FaCog />}
                   onClick={() => setShowSettings((visible) => !visible)}
@@ -952,7 +1111,15 @@ function Content() {
               <PanelSectionRow>
                 <div style={styles.smallText}>
                   Font repair renderer active for this PDF. If square blocks remain, the
-                  PDF likely has missing or damaged embedded font mappings.
+                  PDF likely needs native page rendering.
+                </div>
+              </PanelSectionRow>
+            ) : null}
+            {useNativeRenderer ? (
+              <PanelSectionRow>
+                <div style={styles.smallText}>
+                  Native page renderer active for this PDF. This is slower, but can fix
+                  PDFs that show square text blocks in the normal renderer.
                 </div>
               </PanelSectionRow>
             ) : null}
@@ -1003,6 +1170,17 @@ function Content() {
                   Font repair: {useCompatibilityRenderer ? "On" : "Off"}
                 </ButtonItem>
               </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  icon={<FaImage />}
+                  disabled={selectedPdf.kind !== "pdf" || !pdfDoc}
+                  description={`Uses SteamOS Poppler when available. Status: ${nativeRendererLabel}.`}
+                  onClick={() => void toggleNativeRenderer()}
+                >
+                  Native page render: {useNativeRenderer ? "On" : "Off"}
+                </ButtonItem>
+              </PanelSectionRow>
             </PanelSection>
           ) : null}
 
@@ -1035,13 +1213,28 @@ function Content() {
                   {renderMessage && !busyMessage ? (
                     <div style={styles.smallText}>{renderMessage}</div>
                   ) : null}
-                  <canvas
-                    ref={canvasRef}
-                    style={{
-                      ...styles.canvas,
-                      visibility: pdfDoc ? "visible" : "hidden"
-                    }}
-                  />
+                  {useNativeRenderer ? (
+                    nativePageImage ? (
+                      <img
+                        alt={`Page ${nativePageImage.page}`}
+                        src={nativePageImage.url}
+                        style={{
+                          ...styles.nativeImage,
+                          width: nativeImageCssWidth
+                            ? `${nativeImageCssWidth}px`
+                            : `${nativePageImage.width}px`
+                        }}
+                      />
+                    ) : null
+                  ) : (
+                    <canvas
+                      ref={canvasRef}
+                      style={{
+                        ...styles.canvas,
+                        visibility: pdfDoc ? "visible" : "hidden"
+                      }}
+                    />
+                  )}
                 </Focusable>
               ) : (
                 <Focusable style={styles.textViewer}>

@@ -7,6 +7,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 import time
 import traceback
 import zipfile
@@ -21,12 +23,13 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Seamdeck"
 )
-PLUGIN_VERSION = "0.1.21"
+PLUGIN_VERSION = "0.1.22"
 SETTINGS_FILE = "settings.json"
 STATE_FILE = "state.json"
 MIN_ZOOM = 0.5
 MAX_ZOOM = 4.0
 PDF_ID_RE = re.compile(r"^[a-f0-9]{64}$")
+RENDER_ID_RE = re.compile(r"^[a-f0-9]{64}$")
 SUPPORTED_EXTENSIONS = {
     ".pdf": "pdf",
     ".epub": "epub",
@@ -37,6 +40,9 @@ TEXT_SIZE_LIMIT_BYTES = 2 * 1024 * 1024
 MAX_LIBRARY_FILES = 500
 MAX_SCAN_SECONDS = 2.0
 QUICK_SCAN_FILES = 25
+NATIVE_RENDER_MIN_WIDTH = 240
+NATIVE_RENDER_MAX_WIDTH = 1800
+NATIVE_RENDER_TIMEOUT_SECONDS = 45
 
 
 def utc_now() -> str:
@@ -86,6 +92,7 @@ class Plugin:
         self._settings: dict[str, Any] = default_settings()
         self._state: dict[str, Any] = {}
         self._file_index: dict[str, Path] = {}
+        self._render_index: dict[str, Path] = {}
         self._last_scan: dict[str, Any] = {
             "status": "not_started",
             "folder": "",
@@ -167,6 +174,85 @@ class Plugin:
                 "url": f"http://127.0.0.1:{self._server_port}/pdf/{pdf_id}?token={self._token}",
                 "sizeBytes": path.stat().st_size,
             }
+
+    async def get_native_render_status(self) -> dict[str, Any]:
+        executable = self._find_executable("pdftoppm")
+        return {
+            "version": PLUGIN_VERSION,
+            "timestamp": utc_now(),
+            "available": executable is not None,
+            "renderer": "pdftoppm" if executable else "",
+            "executable": executable or "",
+            "message": (
+                "Native Poppler renderer is available"
+                if executable
+                else "Native Poppler renderer was not found on this Steam Deck"
+            ),
+        }
+
+    async def get_native_page_render(
+        self, pdf_id: str, page: int, width: int
+    ) -> dict[str, Any]:
+        async with self._get_lock():
+            self._ensure_storage_loaded()
+            self._validate_pdf_id(pdf_id)
+            path = self._file_index.get(pdf_id)
+            if path is None:
+                self._refresh_file_index()
+                path = self._file_index.get(pdf_id)
+            if path is None:
+                raise FileNotFoundError("File is no longer available in the configured folder")
+            if path.suffix.lower() != ".pdf":
+                raise ValueError("Native rendering only supports PDF files")
+
+            pdf_path = path.resolve()
+            await self._start_http_server()
+
+        executable = self._find_executable("pdftoppm")
+        if executable is None:
+            raise RuntimeError(
+                "Native PDF renderer is not available on this Steam Deck. "
+                "Use normal rendering, or install/check Poppler outside the plugin."
+            )
+
+        page_number = max(1, int(page))
+        render_width = max(
+            NATIVE_RENDER_MIN_WIDTH,
+            min(NATIVE_RENDER_MAX_WIDTH, int(width or NATIVE_RENDER_MIN_WIDTH)),
+        )
+        pdf_stat = pdf_path.stat()
+        render_key = (
+            f"{pdf_id}:{page_number}:{render_width}:"
+            f"{pdf_stat.st_size}:{int(pdf_stat.st_mtime)}:pdftoppm"
+        )
+        render_id = hashlib.sha256(render_key.encode("utf-8")).hexdigest()
+        output_dir = self.runtime_dir / "native-render"
+        output_path = output_dir / f"{render_id}.png"
+
+        if not output_path.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+            await self._render_pdf_page_with_pdftoppm(
+                executable=executable,
+                pdf_path=pdf_path,
+                output_path=output_path,
+                page=page_number,
+                width=render_width,
+            )
+
+        self._render_index[render_id] = output_path
+        return {
+            "version": PLUGIN_VERSION,
+            "timestamp": utc_now(),
+            "id": render_id,
+            "url": (
+                f"http://127.0.0.1:{self._server_port}/render/{render_id}"
+                f"?token={self._token}"
+            ),
+            "renderer": "pdftoppm",
+            "page": page_number,
+            "width": render_width,
+            "sizeBytes": output_path.stat().st_size,
+        }
 
     async def get_text_content(self, file_id: str) -> dict[str, Any]:
         async with self._get_lock():
@@ -784,6 +870,104 @@ class Plugin:
         normalized_path = str(path.resolve())
         return hashlib.sha256(normalized_path.encode("utf-8")).hexdigest()
 
+    def _find_executable(self, name: str) -> str | None:
+        found = shutil.which(name)
+        if found:
+            return found
+
+        for candidate in (
+            Path("/usr/bin") / name,
+            Path("/bin") / name,
+            Path("/usr/local/bin") / name,
+        ):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+
+        return None
+
+    async def _render_pdf_page_with_pdftoppm(
+        self,
+        executable: str,
+        pdf_path: Path,
+        output_path: Path,
+        page: int,
+        width: int,
+    ) -> None:
+        if output_path.exists():
+            output_path.unlink()
+
+        output_prefix = output_path.with_suffix("")
+        command = [
+            executable,
+            "-f",
+            str(page),
+            "-l",
+            str(page),
+            "-scale-to-x",
+            str(width),
+            "-scale-to-y",
+            "-1",
+            "-png",
+            "-singlefile",
+            str(pdf_path),
+            str(output_prefix),
+        ]
+        started = time.monotonic()
+        loop = asyncio.get_running_loop()
+
+        def run_command() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=NATIVE_RENDER_TIMEOUT_SECONDS,
+            )
+
+        try:
+            result = await loop.run_in_executor(None, run_command)
+        except subprocess.TimeoutExpired as error:
+            self._log(
+                "error",
+                "Native PDF render timed out",
+                {"pdf": pdf_path.name, "page": page, "width": width, "error": str(error)},
+            )
+            raise RuntimeError(
+                "Native PDF renderer took too long. This PDF may be very large or damaged."
+            ) from error
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if result.returncode != 0 or not output_path.exists():
+            self._log(
+                "error",
+                "Native PDF render failed",
+                {
+                    "pdf": pdf_path.name,
+                    "page": page,
+                    "width": width,
+                    "returnCode": result.returncode,
+                    "stdout": result.stdout[-1000:],
+                    "stderr": result.stderr[-1000:],
+                    "elapsedMs": elapsed_ms,
+                },
+            )
+            raise RuntimeError(
+                "Native PDF renderer could not render this page. "
+                "The PDF may be corrupted or use a structure this renderer cannot read."
+            )
+
+        self._log(
+            "debug",
+            "Native PDF page rendered",
+            {
+                "pdf": pdf_path.name,
+                "page": page,
+                "width": width,
+                "sizeBytes": output_path.stat().st_size,
+                "elapsedMs": elapsed_ms,
+            },
+        )
+
     def _validate_pdf_id(self, pdf_id: str) -> None:
         if not isinstance(pdf_id, str) or PDF_ID_RE.fullmatch(pdf_id) is None:
             self._log("warning", "Invalid PDF id rejected", {"id": str(pdf_id)})
@@ -842,13 +1026,38 @@ class Plugin:
                 return
 
             parsed = urlparse(target)
-            if not parsed.path.startswith("/pdf/"):
+            if not (
+                parsed.path.startswith("/pdf/") or parsed.path.startswith("/render/")
+            ):
                 await self._send_simple_response(writer, 404, "Not Found", b"Not Found")
                 return
 
             query = parse_qs(parsed.query)
             if query.get("token", [""])[0] != self._token:
                 await self._send_simple_response(writer, 403, "Forbidden", b"Forbidden")
+                return
+
+            if parsed.path.startswith("/render/"):
+                render_id = unquote(parsed.path.removeprefix("/render/"))
+                if RENDER_ID_RE.fullmatch(render_id) is None:
+                    await self._send_simple_response(writer, 400, "Bad Request", b"Bad Request")
+                    return
+
+                render_path = self._render_index.get(render_id)
+                if render_path is None or not render_path.exists():
+                    await self._send_simple_response(writer, 404, "Not Found", b"Not Found")
+                    return
+
+                await self._send_static_file_response(
+                    writer,
+                    method=method,
+                    path=render_path,
+                    content_type="image/png",
+                )
+                return
+
+            if not parsed.path.startswith("/pdf/"):
+                await self._send_simple_response(writer, 404, "Not Found", b"Not Found")
                 return
 
             pdf_id = unquote(parsed.path.removeprefix("/pdf/"))
@@ -952,6 +1161,35 @@ class Plugin:
                     break
                 writer.write(chunk)
                 remaining -= len(chunk)
+                await writer.drain()
+
+    async def _send_static_file_response(
+        self,
+        writer: asyncio.StreamWriter,
+        method: str,
+        path: Path,
+        content_type: str,
+    ) -> None:
+        size = path.stat().st_size
+        await self._send_headers(
+            writer,
+            200,
+            "OK",
+            {
+                "Content-Type": content_type,
+                "Content-Length": str(size),
+                "Cache-Control": "no-store",
+            },
+        )
+        if method == "HEAD" or size == 0:
+            return
+
+        with path.open("rb") as file_handle:
+            while True:
+                chunk = file_handle.read(64 * 1024)
+                if not chunk:
+                    break
+                writer.write(chunk)
                 await writer.drain()
 
     def _parse_range(self, range_header: str, size: int) -> tuple[int, int] | None:

@@ -380,3 +380,73 @@ def test_http_range_response_serves_partial_pdf(plugin_module):
     assert b"206 Partial Content" in header
     assert b"Content-Range: bytes 0-7/" in header
     assert body == pdf_bytes[:8]
+
+
+def test_native_renderer_status_reports_unavailable(plugin_module, monkeypatch):
+    module, _logger = plugin_module
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    plugin = module.Plugin()
+
+    async def exercise():
+        await plugin._main()
+        status = await plugin.get_native_render_status()
+        await plugin._unload()
+        return status
+
+    status = run(exercise())
+    assert status["available"] is False
+    assert status["renderer"] == ""
+    assert "not found" in status["message"].lower()
+
+
+def test_native_page_render_requires_renderer(plugin_module, monkeypatch):
+    module, _logger = plugin_module
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    plugin = module.Plugin()
+
+    async def exercise():
+        await plugin._main()
+        pdf_folder = Path((await plugin.get_settings())["pdfFolder"])
+        (pdf_folder / "native.pdf").write_bytes(b"%PDF-1.7\n")
+        entry = (await plugin.list_pdfs())[0]
+        with pytest.raises(RuntimeError):
+            await plugin.get_native_page_render(entry["id"], 1, 400)
+        await plugin._unload()
+
+    run(exercise())
+
+
+def test_http_render_response_serves_native_png(plugin_module):
+    module, _logger = plugin_module
+    plugin = module.Plugin()
+    render_id = "a" * 64
+    png_bytes = b"\x89PNG\r\n\x1a\nfake"
+
+    async def exercise():
+        await plugin._main()
+        await plugin._start_http_server()
+        render_path = plugin.runtime_dir / "native-render" / f"{render_id}.png"
+        render_path.parent.mkdir(parents=True)
+        render_path.write_bytes(png_bytes)
+        plugin._render_index[render_id] = render_path
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", plugin._server_port)
+        request = (
+            f"GET /render/{render_id}?token={plugin._token} HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+        writer.write(request.encode("ascii"))
+        await writer.drain()
+        response = await reader.read()
+        writer.close()
+        await writer.wait_closed()
+        await plugin._unload()
+        return response
+
+    response = run(exercise())
+    header, body = response.split(b"\r\n\r\n", 1)
+    assert b"200 OK" in header
+    assert b"Content-Type: image/png" in header
+    assert body == png_bytes

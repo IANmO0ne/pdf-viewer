@@ -9,7 +9,8 @@ This project replaces the earlier `IANmO0ne/pdf-viewer` prototype while keeping 
 - The old infinite-scroll mode rendered many pages into the Decky side panel at once. V1 now renders one page at a time to keep memory and frame time bounded in Gaming Mode.
 - The old `react-pdf` dependency is not used. The new frontend talks to `pdfjs-dist` directly, which avoids the heavier dependency chain and native `canvas` install trouble seen on Windows.
 - The default PDF folder is now `/home/deck/Documents/PDF Seamdeck` instead of a plugin runtime directory, making guides easier to manage from Steam Deck Desktop Mode.
-- The library scan is now recursive and includes PDF, EPUB, TXT, and Markdown files. EPUB/TXT support uses a lightweight readable text view for v1.
+- The library scan includes PDF, EPUB, TXT, and Markdown files directly inside `/home/deck/Documents/PDF Seamdeck`. EPUB/TXT support uses a lightweight readable text view for v1.
+- Some old strategy-guide PDFs expose font data that PDF.js renders as square blocks even though desktop PDF readers handle them. The new build keeps PDF.js as the default path and adds an optional native Poppler page-render fallback for those files.
 
 ## What Was Preserved
 
