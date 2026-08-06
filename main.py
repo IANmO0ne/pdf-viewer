@@ -23,7 +23,7 @@ import decky
 DEFAULT_PDF_FOLDER = os.environ.get(
     "PDF_VIEWER_DEFAULT_FOLDER", "/home/deck/Documents/PDF Steamdeck"
 )
-PLUGIN_VERSION = "0.1.29"
+PLUGIN_VERSION = "0.1.30"
 AUTHOR_SIGNATURE = (
     "SES Bringer of Destruction, delivering democracy one orbital strike at a time."
 )
@@ -64,6 +64,8 @@ def default_pdf_state() -> dict[str, Any]:
     return {
         "lastPage": 1,
         "zoom": 1.0,
+        "scrollLeft": 0.0,
+        "scrollTop": 0.0,
         "bookmarks": [],
     }
 
@@ -291,13 +293,22 @@ class Plugin:
             state = self._state_for(pdf_id)
             return copy.deepcopy(state)
 
-    async def save_pdf_position(self, pdf_id: str, page: int, zoom: float) -> dict[str, Any]:
+    async def save_pdf_position(
+        self,
+        pdf_id: str,
+        page: int,
+        zoom: float,
+        scroll_left: float = 0.0,
+        scroll_top: float = 0.0,
+    ) -> dict[str, Any]:
         async with self._get_lock():
             self._ensure_storage_loaded()
             self._validate_pdf_id(pdf_id)
             state = self._state_for(pdf_id)
             state["lastPage"] = max(1, int(page))
             state["zoom"] = self._clamp_zoom(zoom)
+            state["scrollLeft"] = max(0.0, float(scroll_left))
+            state["scrollTop"] = max(0.0, float(scroll_top))
             self._write_json(self.state_path, self._state)
             return copy.deepcopy(state)
 
@@ -439,6 +450,14 @@ class Plugin:
         except (TypeError, ValueError):
             normalized["lastPage"] = 1
         normalized["zoom"] = self._clamp_zoom(raw_state.get("zoom", 1.0))
+        try:
+            normalized["scrollLeft"] = max(0.0, float(raw_state.get("scrollLeft", 0.0)))
+        except (TypeError, ValueError):
+            normalized["scrollLeft"] = 0.0
+        try:
+            normalized["scrollTop"] = max(0.0, float(raw_state.get("scrollTop", 0.0)))
+        except (TypeError, ValueError):
+            normalized["scrollTop"] = 0.0
         normalized["bookmarks"] = self._sanitize_bookmarks(raw_state.get("bookmarks", []))
         self._state[pdf_id] = normalized
         return normalized
@@ -559,19 +578,6 @@ class Plugin:
             "folder": str(folder),
             "count": len(entries),
             "elapsedMs": elapsed_ms,
-            "error": "",
-        }
-        return entries
-
-    def _scan_supported_files(self) -> list[dict[str, Any]]:
-        folder = Path(self._settings["pdfFolder"]).expanduser().absolute()
-        entries, index = self._scan_supported_files_for_folder(folder)
-        self._file_index = index
-        self._last_scan = {
-            "status": "ok",
-            "folder": str(folder),
-            "count": len(entries),
-            "elapsedMs": 0,
             "error": "",
         }
         return entries
@@ -903,7 +909,11 @@ class Plugin:
                 return
 
             pdf_id = unquote(parsed.path.removeprefix("/pdf/"))
-            self._validate_pdf_id(pdf_id)
+            try:
+                self._validate_pdf_id(pdf_id)
+            except ValueError:
+                await self._send_simple_response(writer, 400, "Bad Request", b"Bad Request")
+                return
             path = self._file_index.get(pdf_id)
             if path is None:
                 await self._send_simple_response(writer, 404, "Not Found", b"Not Found")

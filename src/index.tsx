@@ -2,14 +2,21 @@ import {
   Button,
   ButtonItem,
   Focusable,
+  GamepadButton,
   PanelSection,
   PanelSectionRow,
   SliderField,
   TextField,
   staticClasses
 } from "@decky/ui";
+import type { GamepadEvent } from "@decky/ui";
 import { call, definePlugin, toaster } from "@decky/api";
-import type { CSSProperties, ReactNode } from "react";
+import type {
+  CSSProperties,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+  UIEvent as ReactUIEvent
+} from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FaArrowLeft,
@@ -89,6 +96,8 @@ interface Bookmark {
 interface PdfState {
   lastPage: number;
   zoom: number;
+  scrollLeft: number;
+  scrollTop: number;
   bookmarks: Bookmark[];
 }
 
@@ -114,6 +123,8 @@ interface ActiveReaderSession {
   fileId: string;
   page?: number;
   zoom?: number;
+  scrollLeft?: number;
+  scrollTop?: number;
   updatedAt: string;
 }
 
@@ -194,8 +205,21 @@ const getNativePageRender = (pdfId: string, page: number, width: number) =>
 const getTextContent = (fileId: string) =>
   call<[string], TextContent>("get_text_content", fileId);
 const getPdfState = (pdfId: string) => call<[string], PdfState>("get_pdf_state", pdfId);
-const savePdfPosition = (pdfId: string, page: number, zoom: number) =>
-  call<[string, number, number], PdfState>("save_pdf_position", pdfId, page, zoom);
+const savePdfPosition = (
+  pdfId: string,
+  page: number,
+  zoom: number,
+  scrollLeft: number,
+  scrollTop: number
+) =>
+  call<[string, number, number, number, number], PdfState>(
+    "save_pdf_position",
+    pdfId,
+    page,
+    zoom,
+    scrollLeft,
+    scrollTop
+  );
 const toggleBookmark = (pdfId: string, page: number) =>
   call<[string, number], BookmarkToggleResult>("toggle_bookmark", pdfId, page);
 const logFrontendEvent = (
@@ -217,6 +241,17 @@ const FAILED_FILES_STORAGE_KEY = "decky-pdf-viewer.failedFiles";
 const ZOOM_STEP_STORAGE_KEY = "decky-pdf-viewer.zoomStep";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 8;
+const PAN_STEP_PX = 90;
+const READER_GAMEPAD_HINTS = {
+  [GamepadButton.BUMPER_LEFT]: "Prev Page",
+  [GamepadButton.BUMPER_RIGHT]: "Next Page",
+  [GamepadButton.TRIGGER_LEFT]: "Zoom Out",
+  [GamepadButton.TRIGGER_RIGHT]: "Zoom In",
+  [GamepadButton.DIR_UP]: "Pan",
+  [GamepadButton.DIR_DOWN]: "Pan",
+  [GamepadButton.DIR_LEFT]: "Pan",
+  [GamepadButton.DIR_RIGHT]: "Pan"
+};
 const MAX_CANVAS_PIXELS = 9_000_000;
 const NATIVE_RENDER_MAX_WIDTH = 3200;
 const MAX_TOC_ITEMS = 300;
@@ -276,7 +311,8 @@ const styles = {
     overflow: "auto",
     overscrollBehavior: "contain",
     touchAction: "pan-x pan-y",
-    padding: "6px"
+    padding: "6px",
+    cursor: "grab"
   },
   canvas: {
     display: "block",
@@ -323,7 +359,10 @@ const styles = {
   bookmarkList: {
     display: "flex",
     flexDirection: "column",
-    gap: "6px"
+    gap: "6px",
+    maxHeight: "360px",
+    overflowY: "auto",
+    paddingRight: "4px"
   },
   fileList: {
     display: "flex",
@@ -357,7 +396,10 @@ const styles = {
     padding: "12px",
     whiteSpace: "pre-wrap",
     fontSize: "14px",
-    lineHeight: "20px"
+    lineHeight: "20px",
+    cursor: "grab",
+    userSelect: "none",
+    WebkitUserSelect: "none"
   },
   smallText: {
     color: "rgba(255, 255, 255, 0.68)",
@@ -427,6 +469,12 @@ function readActiveReaderSession(): ActiveReaderSession | null {
       zoom: Number.isFinite(parsed.zoom)
         ? clamp(Number(parsed.zoom), MIN_ZOOM, MAX_ZOOM)
         : undefined,
+      scrollLeft: Number.isFinite(parsed.scrollLeft)
+        ? Math.max(0, Number(parsed.scrollLeft))
+        : undefined,
+      scrollTop: Number.isFinite(parsed.scrollTop)
+        ? Math.max(0, Number(parsed.scrollTop))
+        : undefined,
       updatedAt:
         typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString()
     };
@@ -436,7 +484,13 @@ function readActiveReaderSession(): ActiveReaderSession | null {
   }
 }
 
-function writeActiveReaderSession(fileId: string, page?: number, zoom?: number): void {
+function writeActiveReaderSession(
+  fileId: string,
+  page?: number,
+  zoom?: number,
+  scrollLeft?: number,
+  scrollTop?: number
+): void {
   const session: ActiveReaderSession = {
     fileId,
     updatedAt: new Date().toISOString()
@@ -446,6 +500,12 @@ function writeActiveReaderSession(fileId: string, page?: number, zoom?: number):
   }
   if (Number.isFinite(zoom)) {
     session.zoom = clamp(Number(zoom), MIN_ZOOM, MAX_ZOOM);
+  }
+  if (Number.isFinite(scrollLeft)) {
+    session.scrollLeft = Math.max(0, Number(scrollLeft));
+  }
+  if (Number.isFinite(scrollTop)) {
+    session.scrollTop = Math.max(0, Number(scrollTop));
   }
   writeStorage(ACTIVE_SESSION_STORAGE_KEY, JSON.stringify(session));
 }
@@ -800,10 +860,30 @@ function Content() {
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<HTMLDivElement | null>(null);
+  const textViewerRef = useRef<HTMLDivElement | null>(null);
+  const dragPanRef = useRef<{ pointerId: number; lastX: number; lastY: number } | null>(null);
+  const pinchTouchesRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchGestureRef = useRef<{ startDistance: number; startZoom: number } | null>(null);
+  const zoomAnchorRef = useRef<{
+    contentX: number;
+    contentY: number;
+    viewportOffsetX: number;
+    viewportOffsetY: number;
+    zoomAtCapture: number;
+  } | null>(null);
   const activeRenderRef = useRef<PdfRenderTask | null>(null);
-  const reopenPositionRef = useRef<{ page: number; zoom: number } | null>(null);
+  const reopenPositionRef = useRef<{
+    page: number;
+    zoom: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
   const restoredActiveFileRef = useRef(false);
   const zoomStepSaveHandleRef = useRef<number | null>(null);
+  const scrollSaveHandleRef = useRef<number | null>(null);
+  const pendingScrollRestoreRef = useRef<{ left: number; top: number; page: number } | null>(
+    null
+  );
 
   const reportError = useCallback(
     async (
@@ -940,6 +1020,10 @@ function Content() {
       setPdfDoc(null);
       setTextContent("");
       setBookmarks([]);
+      // A pinch gesture never spans across opening a (possibly different) document, so
+      // any anchor left over from one is stale here regardless of the reason we're
+      // (re)opening a file.
+      zoomAnchorRef.current = null;
 
       try {
         if (selectedPdf.kind !== "pdf") {
@@ -1001,6 +1085,11 @@ function Content() {
         setZoom(
           clamp(reopenPosition?.zoom || sessionPosition?.zoom || state.zoom || 1, MIN_ZOOM, MAX_ZOOM)
         );
+        pendingScrollRestoreRef.current = {
+          left: reopenPosition?.scrollLeft ?? sessionPosition?.scrollLeft ?? state.scrollLeft ?? 0,
+          top: reopenPosition?.scrollTop ?? sessionPosition?.scrollTop ?? state.scrollTop ?? 0,
+          page: safePage
+        };
         setBookmarks(state.bookmarks || []);
         clearFailedFile(selectedPdf.id);
         setBusyMessage("");
@@ -1034,16 +1123,24 @@ function Content() {
       return () => undefined;
     }
 
-    writeActiveReaderSession(selectedPdf.id, pageNumber, zoom);
-
+    const pdfId = selectedPdf.id;
     const handle = window.setTimeout(() => {
-      void savePdfPosition(selectedPdf.id, pageNumber, zoom).catch((error: unknown) => {
-        void reportError("Unable to save reading position", error, {
-          pdfId: selectedPdf.id,
-          page: pageNumber,
-          zoom
-        });
-      });
+      // Read scroll position here, not at effect-start: changePage's smooth scroll-to-top
+      // and the pinch-zoom anchor correction both settle the viewer asynchronously, so
+      // reading now (after the debounce delay) reflects the settled position instead of
+      // whatever was on screen the instant page/zoom changed.
+      const scrollLeft = viewerRef.current?.scrollLeft ?? 0;
+      const scrollTop = viewerRef.current?.scrollTop ?? 0;
+      writeActiveReaderSession(pdfId, pageNumber, zoom, scrollLeft, scrollTop);
+      void savePdfPosition(pdfId, pageNumber, zoom, scrollLeft, scrollTop).catch(
+        (error: unknown) => {
+          void reportError("Unable to save reading position", error, {
+            pdfId,
+            page: pageNumber,
+            zoom
+          });
+        }
+      );
     }, 350);
 
     return () => window.clearTimeout(handle);
@@ -1162,6 +1259,23 @@ function Content() {
 
         if (!cancelled) {
           setRenderMessage("");
+          const anchor = zoomAnchorRef.current;
+          if (anchor) {
+            const scaleRatio = zoom / anchor.zoomAtCapture;
+            viewer.scrollLeft = anchor.contentX * scaleRatio - anchor.viewportOffsetX;
+            viewer.scrollTop = anchor.contentY * scaleRatio - anchor.viewportOffsetY;
+            zoomAnchorRef.current = null;
+          } else if (pendingScrollRestoreRef.current) {
+            // Only apply if this render is still for the page the restore was captured
+            // for; if a page/zoom change cancelled the very first render before it could
+            // consume this, it's now stale and shouldn't be applied to a different page.
+            const pending = pendingScrollRestoreRef.current;
+            pendingScrollRestoreRef.current = null;
+            if (pending.page === pageNumber) {
+              viewer.scrollLeft = pending.left;
+              viewer.scrollTop = pending.top;
+            }
+          }
         }
       } catch (error) {
         if (cancelled || describeError(error).toLowerCase().includes("cancel")) {
@@ -1170,7 +1284,12 @@ function Content() {
 
         if (!useCompatibilityRenderer) {
           setRenderMessage("Retrying with compatibility renderer...");
-          reopenPositionRef.current = { page: pageNumber, zoom };
+          reopenPositionRef.current = {
+            page: pageNumber,
+            zoom,
+            scrollLeft: viewer.scrollLeft,
+            scrollTop: viewer.scrollTop
+          };
           await withTimeout(
             logFrontendEvent("warning", "Retrying PDF render with compatibility renderer", {
               pdfId: selectedPdf?.id,
@@ -1335,6 +1454,10 @@ function Content() {
   };
 
   const changePage = (nextPage: number) => {
+    // A leftover pinch-zoom anchor from this page must not get applied to the next
+    // page's render (it targets content coordinates that no longer mean anything once
+    // the page changes).
+    zoomAnchorRef.current = null;
     const safePage = clamp(Math.trunc(nextPage), 1, Math.max(1, pageCount));
     setPageNumber(safePage);
     setJumpPage(safePage);
@@ -1343,6 +1466,183 @@ function Content() {
 
   const changeZoom = (nextZoom: number) => {
     setZoom(clamp(Number(nextZoom.toFixed(2)), MIN_ZOOM, MAX_ZOOM));
+  };
+
+  const panActiveViewer = (ref: typeof viewerRef, direction: number) => {
+    const el = ref.current;
+    if (!el) {
+      return;
+    }
+    if (direction === GamepadButton.DIR_UP) {
+      el.scrollBy({ top: -PAN_STEP_PX });
+    } else if (direction === GamepadButton.DIR_DOWN) {
+      el.scrollBy({ top: PAN_STEP_PX });
+    } else if (direction === GamepadButton.DIR_LEFT) {
+      el.scrollBy({ left: -PAN_STEP_PX });
+    } else if (direction === GamepadButton.DIR_RIGHT) {
+      el.scrollBy({ left: PAN_STEP_PX });
+    }
+  };
+
+  // Remembers scroll position (in addition to page/zoom) so reopening a PDF, whether
+  // from the same session's Quick Access Menu toggle or a fresh plugin start, restores
+  // the same spot instead of always landing at the top of the page.
+  const onPdfViewerScroll = (evt: ReactUIEvent<HTMLDivElement>) => {
+    if (!selectedPdf || selectedPdf.kind !== "pdf" || !pdfDoc) {
+      return;
+    }
+    const scrollLeft = evt.currentTarget.scrollLeft;
+    const scrollTop = evt.currentTarget.scrollTop;
+    const pdfId = selectedPdf.id;
+
+    if (scrollSaveHandleRef.current !== null) {
+      window.clearTimeout(scrollSaveHandleRef.current);
+    }
+    scrollSaveHandleRef.current = window.setTimeout(() => {
+      scrollSaveHandleRef.current = null;
+      writeActiveReaderSession(pdfId, pageNumber, zoom, scrollLeft, scrollTop);
+      void savePdfPosition(pdfId, pageNumber, zoom, scrollLeft, scrollTop).catch(() => undefined);
+    }, 400);
+  };
+
+  // Cursor-drag panning for trackpad/mouse pointers only; real touchscreen drags
+  // already pan natively via the viewer's own overflow scroll, so we leave those alone.
+  const onDragPanStart = (evt: ReactPointerEvent<HTMLDivElement>) => {
+    if (evt.pointerType !== "mouse" || evt.button !== 0) {
+      return;
+    }
+    dragPanRef.current = { pointerId: evt.pointerId, lastX: evt.clientX, lastY: evt.clientY };
+    evt.currentTarget.setPointerCapture(evt.pointerId);
+  };
+
+  const onDragPanMove = (evt: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragPanRef.current;
+    if (!drag || drag.pointerId !== evt.pointerId) {
+      return;
+    }
+    const deltaX = evt.clientX - drag.lastX;
+    const deltaY = evt.clientY - drag.lastY;
+    evt.currentTarget.scrollBy({ left: -deltaX, top: -deltaY });
+    drag.lastX = evt.clientX;
+    drag.lastY = evt.clientY;
+  };
+
+  const onDragPanEnd = (evt: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragPanRef.current;
+    if (!drag || drag.pointerId !== evt.pointerId) {
+      return;
+    }
+    dragPanRef.current = null;
+    if (evt.currentTarget.hasPointerCapture(evt.pointerId)) {
+      evt.currentTarget.releasePointerCapture(evt.pointerId);
+    }
+  };
+
+  // Two-finger pinch-to-zoom for the PDF page view. touchAction is switched to "none"
+  // for the duration of the pinch so the browser doesn't also try to pan/scroll the
+  // same two-finger gesture, then restored once back down to 0-1 touches.
+  const touchPointDistance = (points: { x: number; y: number }[]) =>
+    Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+
+  const onPdfViewerPointerDown = (evt: ReactPointerEvent<HTMLDivElement>) => {
+    if (evt.pointerType === "mouse") {
+      onDragPanStart(evt);
+      return;
+    }
+    if (evt.pointerType !== "touch" || selectedPdf?.kind !== "pdf" || !pdfDoc) {
+      return;
+    }
+    pinchTouchesRef.current.set(evt.pointerId, { x: evt.clientX, y: evt.clientY });
+    if (pinchTouchesRef.current.size === 2) {
+      pinchGestureRef.current = {
+        startDistance: touchPointDistance(Array.from(pinchTouchesRef.current.values())),
+        startZoom: zoom
+      };
+      evt.currentTarget.style.touchAction = "none";
+    }
+  };
+
+  const onPdfViewerPointerMove = (evt: ReactPointerEvent<HTMLDivElement>) => {
+    if (evt.pointerType === "mouse") {
+      onDragPanMove(evt);
+      return;
+    }
+    if (!pinchTouchesRef.current.has(evt.pointerId)) {
+      return;
+    }
+    pinchTouchesRef.current.set(evt.pointerId, { x: evt.clientX, y: evt.clientY });
+    const gesture = pinchGestureRef.current;
+    if (gesture && pinchTouchesRef.current.size === 2 && gesture.startDistance > 0) {
+      const points = Array.from(pinchTouchesRef.current.values());
+      const currentDistance = touchPointDistance(points);
+      const viewerEl = viewerRef.current;
+      if (viewerEl) {
+        const rect = viewerEl.getBoundingClientRect();
+        const midX = (points[0].x + points[1].x) / 2;
+        const midY = (points[0].y + points[1].y) / 2;
+        zoomAnchorRef.current = {
+          contentX: viewerEl.scrollLeft + (midX - rect.left),
+          contentY: viewerEl.scrollTop + (midY - rect.top),
+          viewportOffsetX: midX - rect.left,
+          viewportOffsetY: midY - rect.top,
+          zoomAtCapture: zoom
+        };
+      }
+      changeZoom(gesture.startZoom * (currentDistance / gesture.startDistance));
+    }
+  };
+
+  const onPdfViewerPointerEnd = (evt: ReactPointerEvent<HTMLDivElement>) => {
+    if (evt.pointerType === "mouse") {
+      onDragPanEnd(evt);
+      return;
+    }
+    if (!pinchTouchesRef.current.has(evt.pointerId)) {
+      return;
+    }
+    pinchTouchesRef.current.delete(evt.pointerId);
+    if (pinchTouchesRef.current.size < 2) {
+      pinchGestureRef.current = null;
+      evt.currentTarget.style.touchAction = "pan-x pan-y";
+    }
+  };
+
+  const onReaderGamepadButton = (evt: GamepadEvent) => {
+    if (selectedPdf?.kind !== "pdf" || !pdfDoc) {
+      return;
+    }
+    switch (evt.detail.button) {
+      case GamepadButton.BUMPER_LEFT:
+        changePage(pageNumber - 1);
+        break;
+      case GamepadButton.BUMPER_RIGHT:
+        changePage(pageNumber + 1);
+        break;
+      case GamepadButton.TRIGGER_LEFT:
+        zoomAnchorRef.current = null;
+        changeZoom(zoom - settings.zoomStep);
+        break;
+      case GamepadButton.TRIGGER_RIGHT:
+        zoomAnchorRef.current = null;
+        changeZoom(zoom + settings.zoomStep);
+        break;
+      default:
+        break;
+    }
+  };
+
+  const onReaderSecondaryButton = () => {
+    if (selectedPdf?.kind !== "pdf") {
+      return;
+    }
+    setShowBookmarks((visible) => !visible);
+  };
+
+  const onReaderOptionsButton = () => {
+    if (selectedPdf?.kind !== "pdf" || !pdfDoc) {
+      return;
+    }
+    toggleContents();
   };
 
   const saveZoomStep = (value: number) => {
@@ -1391,11 +1691,19 @@ function Content() {
       if (zoomStepSaveHandleRef.current !== null) {
         window.clearTimeout(zoomStepSaveHandleRef.current);
       }
+      if (scrollSaveHandleRef.current !== null) {
+        window.clearTimeout(scrollSaveHandleRef.current);
+      }
     };
   }, []);
 
   const toggleFontRepair = () => {
-    reopenPositionRef.current = { page: pageNumber, zoom };
+    reopenPositionRef.current = {
+      page: pageNumber,
+      zoom,
+      scrollLeft: viewerRef.current?.scrollLeft ?? 0,
+      scrollTop: viewerRef.current?.scrollTop ?? 0
+    };
     setErrorMessage("");
     setNativePageImage(null);
     setRenderMessage(
@@ -1470,6 +1778,33 @@ function Content() {
 
   return (
     <div style={styles.shell}>
+      <style>{`
+        .pdfv-scroll {
+          scrollbar-width: thin;
+          scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+          scrollbar-gutter: stable;
+        }
+        .pdfv-scroll::-webkit-scrollbar {
+          width: 9px;
+          height: 9px;
+        }
+        .pdfv-scroll::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .pdfv-scroll::-webkit-scrollbar-thumb {
+          background-color: rgba(255, 255, 255, 0.28);
+          border-radius: 6px;
+          border: 2px solid transparent;
+          background-clip: padding-box;
+        }
+        .pdfv-scroll::-webkit-scrollbar-thumb:hover,
+        .pdfv-scroll::-webkit-scrollbar-thumb:active {
+          background-color: rgba(255, 255, 255, 0.46);
+        }
+        .pdfv-drag-pan:active {
+          cursor: grabbing;
+        }
+      `}</style>
       <PanelSection title="PDF Folder">
         <PanelSectionRow>
           <div style={styles.smallText}>{currentFolder}</div>
@@ -1523,7 +1858,7 @@ function Content() {
           ) : null}
           {pdfs.length > 0 ? (
             <PanelSectionRow>
-              <div style={styles.fileList}>
+              <div style={styles.fileList} className="pdfv-scroll">
                 <TextField
                   label="Search files"
                   value={fileFilter}
@@ -1584,13 +1919,19 @@ function Content() {
                   label="Zoom out"
                   icon={<FaSearchMinus />}
                   disabled={selectedPdf.kind !== "pdf" || !pdfDoc || zoom <= MIN_ZOOM}
-                  onClick={() => changeZoom(zoom - settings.zoomStep)}
+                  onClick={() => {
+                    zoomAnchorRef.current = null;
+                    changeZoom(zoom - settings.zoomStep);
+                  }}
                 />
                 <IconButton
                   label="Zoom in"
                   icon={<FaSearchPlus />}
                   disabled={selectedPdf.kind !== "pdf" || !pdfDoc || zoom >= MAX_ZOOM}
-                  onClick={() => changeZoom(zoom + settings.zoomStep)}
+                  onClick={() => {
+                    zoomAnchorRef.current = null;
+                    changeZoom(zoom + settings.zoomStep);
+                  }}
                 />
                 <IconButton
                   label="Bookmark page"
@@ -1780,7 +2121,7 @@ function Content() {
                 </ButtonItem>
               </PanelSectionRow>
               <PanelSectionRow>
-                <div style={styles.tocList}>
+                <div style={styles.tocList} className="pdfv-scroll">
                   {tocItems.length === 0 ? (
                     <div style={styles.smallText}>
                       This PDF does not expose a table of contents. Use page jump above.
@@ -1817,7 +2158,7 @@ function Content() {
           {showBookmarks ? (
             <PanelSection title="Bookmarks">
               <PanelSectionRow>
-                <div style={styles.bookmarkList}>
+                <div style={styles.bookmarkList} className="pdfv-scroll">
                   {bookmarks.length === 0 ? (
                     <div style={styles.smallText}>No pages bookmarked for this PDF.</div>
                   ) : (
@@ -1838,7 +2179,26 @@ function Content() {
           <PanelSection>
             <PanelSectionRow>
               {selectedPdf.kind === "pdf" ? (
-                <Focusable style={styles.viewerFrame} ref={viewerRef}>
+                <Focusable
+                  style={styles.viewerFrame}
+                  className="pdfv-scroll pdfv-drag-pan"
+                  ref={viewerRef}
+                  actionDescriptionMap={READER_GAMEPAD_HINTS}
+                  onSecondaryActionDescription="Bookmarks"
+                  onOptionsActionDescription="Contents"
+                  onGamepadDirection={(evt) => {
+                    panActiveViewer(viewerRef, evt.detail.button);
+                    evt.stopPropagation();
+                  }}
+                  onButtonDown={onReaderGamepadButton}
+                  onSecondaryButton={onReaderSecondaryButton}
+                  onOptionsButton={onReaderOptionsButton}
+                  onPointerDown={onPdfViewerPointerDown}
+                  onPointerMove={onPdfViewerPointerMove}
+                  onPointerUp={onPdfViewerPointerEnd}
+                  onPointerCancel={onPdfViewerPointerEnd}
+                  onScroll={onPdfViewerScroll}
+                >
                   {busyMessage ? <div style={styles.empty}>{busyMessage}</div> : null}
                   {renderMessage && !busyMessage ? (
                     <div style={styles.smallText}>{renderMessage}</div>
@@ -1867,7 +2227,25 @@ function Content() {
                   )}
                 </Focusable>
               ) : (
-                <Focusable style={styles.textViewer}>
+                <Focusable
+                  style={styles.textViewer}
+                  className="pdfv-scroll pdfv-drag-pan"
+                  ref={textViewerRef}
+                  actionDescriptionMap={{
+                    [GamepadButton.DIR_UP]: "Pan",
+                    [GamepadButton.DIR_DOWN]: "Pan",
+                    [GamepadButton.DIR_LEFT]: "Pan",
+                    [GamepadButton.DIR_RIGHT]: "Pan"
+                  }}
+                  onGamepadDirection={(evt) => {
+                    panActiveViewer(textViewerRef, evt.detail.button);
+                    evt.stopPropagation();
+                  }}
+                  onPointerDown={onDragPanStart}
+                  onPointerMove={onDragPanMove}
+                  onPointerUp={onDragPanEnd}
+                  onPointerCancel={onDragPanEnd}
+                >
                   {busyMessage ? <div>{busyMessage}</div> : textContent}
                 </Focusable>
               )}
